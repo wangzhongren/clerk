@@ -1,7 +1,6 @@
 # Clerk Agent 3.0 - 办公自动化智能体
 
 ![Clerk Agent](https://img.shields.io/badge/version-3.0.0-blue)
-![License](https://img.shields.io/badge/license-MIT-green)
 
 Clerk Agent 是一个基于大语言模型的办公自动化智能体，能够理解自然语言指令、执行复杂任务、调用工具函数，并将成功经验沉淀为可复用的技能。通过 ReAct（推理+行动）机制，Clerk 能够自主规划、执行和验证任务，同时严格遵守安全约束。
 
