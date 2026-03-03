@@ -1,0 +1,464 @@
+// 核心 JS 逻辑
+let currentTaskId = null;
+let isProcessing = false;
+let currentAssistantMessageContent = null;
+let currentStreamingText = '';
+let lastPythonCode = ''; // 存储最近的 Python 代码
+const MAX_CONVERSATION_TURNS = 50; // 最大对话轮数
+
+// 从 localStorage 加载对话历史
+let conversationHistory = loadConversationHistory();
+
+document.addEventListener('DOMContentLoaded', () => {
+    bindNavEvents();
+    loadSkills();
+    loadTasks();
+    loadConfig();
+    
+    // 初始化页面时显示保存的对话历史
+    renderSavedConversation();
+});
+
+function bindNavEvents() {
+    document.querySelectorAll('.nav-item').forEach(item => {
+        item.addEventListener('click', function() {
+            document.querySelectorAll('.nav-item').forEach(i => i.classList.remove('active'));
+            this.classList.add('active');
+            
+            document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+            const tabId = this.getAttribute('data-tab');
+            document.getElementById(tabId).classList.add('active');
+            document.getElementById('page-title').textContent = this.textContent.trim();
+        });
+    });
+    document.getElementById('submit-task').addEventListener('click', submitTask);
+    document.getElementById('user-input').addEventListener('keypress', e => { if (e.key === 'Enter') submitTask(); });
+    document.getElementById('config-form').addEventListener('submit', saveConfig);
+}
+
+// 从 localStorage 加载对话历史
+function loadConversationHistory() {
+    try {
+        const saved = localStorage.getItem('clerk_conversation_history');
+        return saved ? JSON.parse(saved) : [];
+    } catch (e) {
+        console.warn('Failed to load conversation history from localStorage:', e);
+        return [];
+    }
+}
+
+// 保存对话历史到 localStorage
+function saveConversationHistory() {
+    try {
+        // 只保存最近的 MAX_CONVERSATION_TURNS 轮对话
+        const trimmedHistory = conversationHistory.slice(-MAX_CONVERSATION_TURNS);
+        localStorage.setItem('clerk_conversation_history', JSON.stringify(trimmedHistory));
+    } catch (e) {
+        console.warn('Failed to save conversation history to localStorage:', e);
+    }
+}
+
+// 渲染保存的对话历史
+function renderSavedConversation() {
+    const container = document.getElementById('conversation-history');
+    container.innerHTML = '';
+    
+    conversationHistory.forEach(msg => {
+        addMessageToHistory(msg.sender, msg.message, false, true);
+    });
+}
+
+// --- 工作台逻辑 ---
+async function submitTask() {
+    if (isProcessing) return;
+    const inputEl = document.getElementById('user-input');
+    const text = inputEl.value.trim();
+    if (!text) return;
+
+    addMessageToHistory('user', text);
+    inputEl.value = '';
+    isProcessing = true;
+    document.getElementById('submit-task').disabled = true;
+
+    // 检查是否接近最大轮数限制
+    let shouldSummarize = false;
+    let enhancedInput = text;
+    
+    if (conversationHistory.length >= MAX_CONVERSATION_TURNS - 1) {
+        shouldSummarize = true;
+        enhancedInput = `【重要】当前对话已接近${MAX_CONVERSATION_TURNS}轮限制，请执行以下操作：
+1. 总结当前任务的整体进展和已完成的工作
+2. 分析当前遇到的问题或挑战（如果有）
+3. 提出明确的下一步行动计划和未来方向
+4. 给出具体的建议或结论
+
+原始用户请求：${text}`;
+    }
+
+    // 1. 创建任务 (如果还没任务ID)
+    if (!currentTaskId) {
+        try {
+            const resp = await fetch('/api/tasks', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({description: text})
+            });
+            const data = await resp.json();
+            if (data.task_id) currentTaskId = data.task_id;
+            else throw new Error(data.error);
+        } catch (e) {
+            addMessageToHistory('assistant', '❌ 创建任务失败: ' + e.message);
+            resetInputState(); return;
+        }
+    }
+
+    // 2. 构建完整的对话历史（整段对话）
+    const history = conversationHistory.map(msg => ({
+        role: msg.sender === 'user' ? 'user' : 'assistant',
+        content: msg.message
+    }));
+
+    // 3. 执行任务 (流式)
+    try {
+        const response = await fetch('/api/execute', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                task_id: currentTaskId, 
+                input: enhancedInput,
+                history: history
+            })
+        });
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+            buffer = lines.pop();
+            
+            for (const line of lines) {
+                if (line.startsWith('data: ')) {
+                    const data = JSON.parse(line.slice(6));
+                    if (data.type === 'llm_token') {
+                        addMessageToHistory('assistant', data.content, true);
+                        // 检测 Python 代码块
+                        if (data.content.includes('```python')) {
+                            lastPythonCode = '';
+                        }
+                        if (lastPythonCode !== undefined) {
+                            lastPythonCode += data.content;
+                        }
+                    } else if (data.type === 'final_response') {
+                        addMessageToHistory('assistant', data.content, false);
+                        
+                    }
+                }
+            }
+        }
+        
+        // 如果触发了总结，在下次对话开始时自动清理最旧的消息
+        if (shouldSummarize) {
+            // 不立即清空，而是标记下次需要清理
+            localStorage.setItem('clerk_needs_cleanup', 'true');
+        }
+        
+    } catch (e) {
+        addMessageToHistory('assistant', '❌ 执行错误: ' + e.message);
+    } finally {
+        resetInputState();
+        loadTasks(); // 刷新任务列表
+    }
+}
+
+function resetInputState() {
+    isProcessing = false;
+    document.getElementById('submit-task').disabled = false;
+    currentAssistantMessageContent = null;
+    currentStreamingText = '';
+}
+
+function scrollToBottom() {
+    const container = document.getElementById('conversation-history');
+    if (container) {
+        // 使用 requestAnimationFrame 确保 DOM 已经渲染完毕
+        requestAnimationFrame(() => {
+            container.scrollTo({
+                top: container.scrollHeight,
+                behavior: 'smooth' // 平滑滚动，演示效果更好
+            });
+        });
+    }
+}
+
+function addMessageToHistory(sender, message, isStreaming = false, isFromStorage = false) {
+    const container = document.getElementById('conversation-history');
+    
+    if (sender === 'user') {
+        const div = document.createElement('div');
+        div.className = 'message-container user';
+        div.innerHTML = `<div class="message-avatar">我</div><div class="message-content">${marked.parse(message)}</div>`;
+        container.appendChild(div);
+        
+        // 只有新消息才添加到历史记录（不是从存储加载的）
+        if (!isFromStorage) {
+            conversationHistory.push({ sender: 'user', message: message });
+            
+            // 检查是否需要清理最旧的消息
+            checkAndCleanupHistory();
+            saveConversationHistory();
+        }
+        
+        currentAssistantMessageContent = null;
+        currentStreamingText = '';
+    } else {
+        if (!currentAssistantMessageContent) {
+            const div = document.createElement('div');
+            div.className = 'message-container assistant';
+            div.innerHTML = `<div class="message-avatar">C</div><div class="message-content"></div>`;
+            container.appendChild(div);
+            currentAssistantMessageContent = div.querySelector('.message-content');
+            currentStreamingText = '';
+        }
+        
+        if (isStreaming) {
+            currentStreamingText += message;
+            currentAssistantMessageContent.innerHTML = marked.parse(currentStreamingText);
+        } else {
+            // 完整消息
+            currentAssistantMessageContent.innerHTML = marked.parse(message);
+            currentAssistantMessageContent = null;
+            currentStreamingText = '';
+            
+            // 只有新消息才添加到历史记录
+            if (!isFromStorage) {
+                debugger
+                conversationHistory.push({ sender: 'assistant', message: message });
+                
+                // 检查是否需要清理最旧的消息
+                checkAndCleanupHistory();
+                saveConversationHistory();
+            }
+        }
+    }
+    scrollToBottom();
+}
+
+// 检查并清理对话历史（静默移除最旧的消息）
+function checkAndCleanupHistory() {
+    // 检查是否之前触发过总结，需要清理
+    const needsCleanup = localStorage.getItem('clerk_needs_cleanup') === 'true';
+    
+    if (needsCleanup && conversationHistory.length > 0) {
+        // 静默移除最开始的几条消息（保留最后 MAX_CONVERSATION_TURNS - 2 条）
+        const keepCount = Math.max(0, MAX_CONVERSATION_TURNS - 2);
+        conversationHistory = conversationHistory.slice(-keepCount);
+        localStorage.removeItem('clerk_needs_cleanup');
+        saveConversationHistory();
+        
+        // 重新渲染对话历史（可选，通常不需要）
+        // renderSavedConversation();
+    }
+    // 始终确保不超过最大轮数
+    else if (conversationHistory.length > MAX_CONVERSATION_TURNS) {
+        conversationHistory = conversationHistory.slice(-(MAX_CONVERSATION_TURNS));
+        saveConversationHistory();
+    }
+}
+
+// --- 脚本保存功能 ---
+function showSaveScriptModal(scriptContent) {
+    document.getElementById('script-content').value = scriptContent;
+    document.getElementById('saveScriptModal').style.display = 'flex';
+}
+
+function closeSaveScriptModal() {
+    document.getElementById('saveScriptModal').style.display = 'none';
+}
+
+async function saveScriptAsSkill() {
+    const skillName = document.getElementById('new-skill-name').value.trim();
+    const skillDescription = document.getElementById('new-skill-description').value.trim();
+    const scriptContent = document.getElementById('script-content').value;
+    
+    if (!skillName) {
+        alert('请输入技能名称');
+        return;
+    }
+    
+    try {
+        const response = await fetch('/api/save_script_as_skill', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                skill_name: skillName,
+                skill_description: skillDescription,
+                script_content: scriptContent
+            })
+        });
+        
+        const data = await response.json();
+        if (data.error) {
+            alert('保存失败: ' + data.error);
+        } else {
+            alert('保存成功: ' + data.message);
+            closeSaveScriptModal();
+            loadSkills(); // 刷新技能列表
+        }
+    } catch (error) {
+        alert('保存失败: ' + error.message);
+    }
+}
+
+// --- 技能中心逻辑 ---
+async function loadSkills() {
+    const listEl = document.getElementById('skills-list');
+    try {
+        const resp = await fetch('/api/skills');
+        const data = await resp.json();
+        listEl.innerHTML = '';
+        if (data.skills.length === 0) listEl.innerHTML = '暂无技能。';
+        
+        data.skills.forEach(skill => {
+            const card = document.createElement('div');
+            card.className = 'skill-card';
+            card.innerHTML = `
+                <div class="skill-info"><h3>${skill}</h3></div>
+                <div class="skill-actions">
+                    <button class="btn-outline" onclick="editSkill('${skill}')">编辑</button>
+                </div>
+            `;
+            listEl.appendChild(card);
+        });
+    } catch (e) { listEl.innerHTML = '加载失败: ' + e.message; }
+}
+
+async function editSkill(name) {
+    try {
+        const resp = await fetch(`/api/skills/${name}`);
+        const data = await resp.json();
+        openSkillModal(name, data.content);
+    } catch (e) { alert('加载失败: ' + e.message); }
+}
+
+async function saveSkill() {
+    const name = document.getElementById('skill-name').value.trim();
+    const content = document.getElementById('skill-content').value.trim();
+    if (!name || !content) return alert('请填写名称和内容');
+    
+    try {
+        const resp = await fetch('/api/skills', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({name, content})
+        });
+        alert('保存成功');
+        closeSkillModal();
+        loadSkills();
+    } catch (e) { alert('保存失败: ' + e.message); }
+}
+
+async function deleteSkill() {
+    const name = document.getElementById('skill-name').value.trim();
+    if (!confirm(`确定删除技能 ${name} 吗？`)) return;
+    try {
+        await fetch(`/api/skills/${name}`, {method: 'DELETE'});
+        closeSkillModal();
+        loadSkills();
+    } catch (e) { alert('删除失败: ' + e.message); }
+}
+
+function openSkillModal(name='', content='') {
+    document.getElementById('skill-name').value = name;
+    document.getElementById('skill-content').value = content;
+    document.getElementById('delete-skill-btn').style.display = name ? 'inline-block' : 'none';
+    document.getElementById('skillModal').style.display = 'flex';
+}
+function closeSkillModal() { document.getElementById('skillModal').style.display = 'none'; }
+
+// --- 任务历史逻辑 ---
+async function loadTasks() {
+    const tbody = document.getElementById('tasks-table-body');
+    try {
+        const resp = await fetch('/api/tasks');
+        const data = await resp.json();
+        tbody.innerHTML = '';
+        if (data.tasks.length === 0) tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;">暂无任务</td></tr>';
+
+        data.tasks.forEach(task => {
+            const row = document.createElement('tr');
+            let badgeClass = task.status === 'Success' ? 'badge-success' : (task.status === 'Failed' ? 'badge-danger' : 'badge-warning');
+            row.innerHTML = `
+                <td>${task.id}</td>
+                <td>${task.created_at}</td>
+                <td>${task.description}</td>
+                <td><span class="badge ${badgeClass}">${task.status}</span></td>
+                <td><button class="btn-outline" onclick="viewTaskDetail('${task.id}')">详情</button></td>
+            `;
+            tbody.appendChild(row);
+        });
+    } catch (e) { tbody.innerHTML = '<tr><td colspan="5">加载失败</td></tr>'; }
+}
+
+async function viewTaskDetail(taskId) {
+    const contentEl = document.getElementById('task-detail-content');
+    contentEl.innerHTML = '加载中...';
+    document.getElementById('task-detail-title').textContent = `任务详情 - ${taskId}`;
+    document.getElementById('taskDetailModal').style.display = 'flex';
+
+    try {
+        const resp = await fetch(`/api/tasks/${taskId}`);
+        const task = await resp.json();
+        
+        let logsHtml = '<pre style="background:var(--google-gray-100); padding:10px; border-radius:4px; overflow-x:auto;">';
+        if(task.logs && task.logs.length > 0) {
+            task.logs.forEach(log => {
+                logsHtml += `[${log.timestamp}] ${JSON.stringify(log.entry)}\n`;
+            });
+        } else {
+            logsHtml += '暂无日志';
+        }
+        logsHtml += '</pre>';
+
+        contentEl.innerHTML = `
+            <p><strong>描述:</strong> ${task.description}</p>
+            <p><strong>状态:</strong> ${task.status}</p>
+            <p><strong>结果:</strong> ${task.result || '无'}</p>
+            <p><strong>日志:</strong></p>
+            ${logsHtml}
+        `;
+    } catch (e) { contentEl.innerHTML = '加载详情失败: ' + e.message; }
+}
+function closeTaskDetailModal() { document.getElementById('taskDetailModal').style.display = 'none'; }
+
+// --- 配置逻辑 ---
+async function loadConfig() {
+    try {
+        const resp = await fetch('/api/config');
+        const config = await resp.json();
+        document.getElementById('api-key').value = config.api_key || '';
+        document.getElementById('base-url').value = config.base_url || '';
+        document.getElementById('model').value = config.model || '';
+    } catch (e) { console.error('加载配置失败'); }
+}
+
+async function saveConfig(e) {
+    e.preventDefault();
+    const config = {
+        api_key: document.getElementById('api-key').value,
+        base_url: document.getElementById('base-url').value,
+        model: document.getElementById('model').value
+    };
+    try {
+        await fetch('/api/config', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(config)
+        });
+        alert('配置已保存');
+    } catch (e) { alert('保存失败: ' + e.message); }
+}

@@ -1,0 +1,16 @@
+api_key: 
+base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+dangerous_commands:
+- rm -rf /
+- format
+- mkfs
+- fdisk
+metadata:
+  description: 办公自动化智能体
+  name: Clerk
+  version: 3.0.0
+model: qwen3-max
+skills_dir: ./skills
+tasks_dir: ./tasks
+temp_scripts_dir: ./temp_scripts
+workspace_root: /

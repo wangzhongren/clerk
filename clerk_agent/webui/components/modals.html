@@ -1,0 +1,57 @@
+<div class="modal" id="skillModal">
+    <div class="modal-content">
+        <div class="modal-header">
+            <span id="skill-modal-title">技能编辑</span>
+            <button class="btn-outline" onclick="closeSkillModal()">取消</button>
+        </div>
+        <div class="form-group">
+            <label>技能名称 (用于调用)</label>
+            <input type="text" class="form-control" id="skill-name" placeholder="read_file">
+        </div>
+        <div class="form-group">
+            <label>技能描述/内容 (Markdown)</label>
+            <textarea class="form-control" id="skill-content" rows="12"></textarea>
+        </div>
+        <div class="modal-footer">
+            <button class="btn-danger" id="delete-skill-btn" style="display:none;">删除</button>
+            <button class="btn-primary" onclick="saveSkill()">保存技能</button>
+        </div>
+    </div>
+</div>
+
+<div class="modal" id="taskDetailModal">
+    <div class="modal-content" style="max-width: 800px;">
+        <div class="modal-header">
+            <span id="task-detail-title">任务详情</span>
+            <button class="btn-outline" onclick="closeTaskDetailModal()">关闭</button>
+        </div>
+        <div id="task-detail-content" style="font-size: 14px; line-height: 1.6;">
+            加载中...
+        </div>
+    </div>
+</div>
+
+<!-- 脚本保存模态框 -->
+<div class="modal" id="saveScriptModal">
+    <div class="modal-content">
+        <div class="modal-header">
+            <span>保存脚本为技能</span>
+            <button class="btn-outline" onclick="closeSaveScriptModal()">取消</button>
+        </div>
+        <div class="form-group">
+            <label>技能名称</label>
+            <input type="text" class="form-control" id="new-skill-name" placeholder="例如：process_csv_data">
+        </div>
+        <div class="form-group">
+            <label>技能描述</label>
+            <textarea class="form-control" id="new-skill-description" rows="4" placeholder="简要描述此技能的功能和用途"></textarea>
+        </div>
+        <div class="form-group">
+            <label>脚本内容</label>
+            <textarea class="form-control" id="script-content" rows="12" readonly></textarea>
+        </div>
+        <div class="modal-footer">
+            <button class="btn-primary" onclick="saveScriptAsSkill()">保存为技能</button>
+        </div>
+    </div>
+</div>
