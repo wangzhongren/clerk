@@ -180,11 +180,6 @@ if 'new_tool' not in global_registry.get_all_functions():
 - 遵循现有代码风格
 - 添加必要的测试用例
 - 更新相关文档
-
-## 📄 许可证
-
-本项目采用 MIT 许可证 - 详见 [LICENSE](LICENSE) 文件。
-
 ---
 
 > **注意**：请妥善保管您的 API 密钥，不要将其提交到公共代码仓库。生产环境中建议使用环境变量或密钥管理服务。
