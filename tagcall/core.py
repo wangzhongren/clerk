@@ -2,6 +2,7 @@ import inspect
 import ast
 from typing import Dict, List, Callable, Any, Optional
 from bs4 import BeautifulSoup
+import re
 
 class FunctionRegistry:
     """函数注册表，支持按 agent 隔离注册"""
@@ -146,81 +147,21 @@ class FunctionRegistry:
         
         return func_info['function'](*args, **kwargs)
 
-# 全局注册表实例
+# 全球注册表实例
 global_registry = FunctionRegistry()
-
-def _split_parameters(args_text: str) -> List[str]:
-    """分割参数字符串，处理嵌套的引号和括号"""
-    parts = []
-    current = ""
-    quote_char = None
-    paren_depth = 0
-    
-    for char in args_text:
-        if char in ['"', "'"] and quote_char is None:
-            quote_char = char
-            current += char
-        elif char == quote_char:
-            quote_char = None
-            current += char
-        elif char == '(' and quote_char is None:
-            paren_depth += 1
-            current += char
-        elif char == ')' and quote_char is None and paren_depth > 0:
-            paren_depth -= 1
-            current += char
-        elif char == ',' and quote_char is None and paren_depth == 0:
-            parts.append(current.strip())
-            current = ""
-        else:
-            current += char
-    
-    if current.strip():
-        parts.append(current.strip())
-    
-    return parts
-
-def _parse_value(value_str: str) -> Any:
-    """解析参数值"""
-    value_str = value_str.strip()
-    
-    # 字符串
-    if (value_str.startswith('"') and value_str.endswith('"')) or \
-       (value_str.startswith("'") and value_str.endswith("'")):
-        return value_str[1:-1]
-    
-    # 数字
-    try:
-        if '.' in value_str:
-            return float(value_str)
-        else:
-            return int(value_str)
-    except ValueError:
-        pass
-    
-    # 布尔值
-    if value_str.lower() == 'true':
-        return True
-    elif value_str.lower() == 'false':
-        return False
-    
-    # None值
-    if value_str.lower() == 'none' or value_str.lower() == 'null':
-        return None
-    
-    # 其他情况返回原字符串
-    return value_str
 
 def _parse_ast_value(node: ast.expr) -> Any:
     """递归地将 AST 节点转换为 Python 对象"""
     if isinstance(node, ast.Constant):
         return node.value
-    elif isinstance(node, ast.Str): # 兼容 Python < 3.8
+    elif isinstance(node, ast.Str):  # 兼容 Python < 3.8
         return node.s
-    elif isinstance(node, ast.Num): # 兼容 Python < 3.8
+    elif isinstance(node, ast.Num):  # 兼容 Python < 3.8
         return node.n
     elif isinstance(node, ast.Name):
-        # 如果参数是变量名而非字面量，返回其名称字符串（视需求而定，这里返回 None 或抛出异常也可）
+        # 如果参数是变量名而非字面量，返回其名称字符串
+        if node.id in ('True', 'False', 'None'):
+            return {'True': True, 'False': False, 'None': None}[node.id]
         return f"<variable: {node.id}>"
     elif isinstance(node, ast.List):
         return [_parse_ast_value(el) for el in node.elts]
@@ -231,9 +172,34 @@ def _parse_ast_value(node: ast.expr) -> Any:
     elif isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
         # 处理负数
         return -_parse_ast_value(node.operand)
+    elif isinstance(node, ast.BinOp):  # 处理二元操作，如 a + b
+        left = _parse_ast_value(node.left)
+        right = _parse_ast_value(node.right)
+        op = type(node.op)
+        if op == ast.Add:
+            return left + right if isinstance(left, (int, float)) and isinstance(right, (int, float)) else f"{left} + {right}"
+        elif op == ast.Sub:
+            return left - right if isinstance(left, (int, float)) and isinstance(right, (int, float)) else f"{left} - {right}"
+        elif op == ast.Mult:
+            return left * right if isinstance(left, (int, float)) and isinstance(right, (int, float)) else f"{left} * {right}"
+        elif op == ast.Div:
+            return left / right if isinstance(left, (int, float)) and isinstance(right, (int, float)) else f"{left} / {right}"
+        else:
+            return f"{left} {op.__name__} {right}"
+    elif isinstance(node, ast.Call):  # 处理函数调用作为参数
+        return f"<call: {ast.unparse(node)}>" if hasattr(ast, 'unparse') else "<call>"
     else:
-        # 对于无法解析的复杂表达式（如函数调用作为参数），返回原始源码或 None
-        return None
+        # 对于无法解析的复杂表达式，返回原始源码
+        return ast.unparse(node) if hasattr(ast, 'unparse') else repr(node)
+
+def _get_full_func_name(node):
+    """获取完整的函数名，处理嵌套属性如 obj.method 或 module.submodule.function"""
+    if isinstance(node, ast.Name):
+        return node.id
+    elif isinstance(node, ast.Attribute):
+        return f"{_get_full_func_name(node.value)}.{node.attr}"
+    else:
+        return repr(node)
 
 def parse_function_calls(text: str) -> List[Dict]:
     """
@@ -259,35 +225,22 @@ def parse_function_calls(text: str) -> List[Dict]:
         # 获取标签内的原始文本
         raw_content = tag.get_text()
         
-        # 清理可能存在的周围空白，但不要过度修改内部格式，因为 ast 需要准确的缩进/换行
+        # 清理可能存在的周围空白，但不要过度修改内部格式
         code_block = raw_content.strip()
         
         if not code_block:
             continue
             
-        # 关键修复点：
-        # 原来的逻辑是按 ';' 分割，这很不安全。
-        # 现在的策略：将整个块视为一个 Python 脚本片段进行 ast 解析。
-        # 为了支持多个连续的函数调用（如 func1(); func2()），我们需要确保它们是合法的语句。
-        
         try:
-            # ast.parse 需要一个完整的模块。如果用户提供的只是表达式列表而没有分号结尾，
-            # 或者有多行字符串，ast.parse 通常能很好地处理，只要语法合法。
-            # 如果原始文本中用分号分隔多个调用，ast 也能识别为多个 Expr 节点。
-            
+            # 尝试直接解析
             tree = ast.parse(code_block)
             
             for node in ast.walk(tree):
                 if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
                     call_node = node.value
                     
-                    func_name = ""
-                    # 处理简单的名字 func() 或属性访问 obj.func()
-                    if isinstance(call_node.func, ast.Name):
-                        func_name = call_node.func.id
-                    elif isinstance(call_node.func, ast.Attribute):
-                        # 如果是 obj.method()，我们可能需要拼接，这里简单取 attr
-                        func_name = call_node.func.attr 
+                    # 改进函数名提取逻辑
+                    func_name = _get_full_func_name(call_node.func)
                     
                     args = []
                     kwargs = {}
@@ -308,14 +261,291 @@ def parse_function_calls(text: str) -> List[Dict]:
                         'kwargs': kwargs
                     })
                     
-        except SyntaxError as e:
-            # 如果 ast 解析失败，说明文本不是合法的 Python 调用语法
-            # 可以选择记录日志或跳过，而不是像原来那样产生错误的部分解析结果
-            print(f"警告：无法解析函数调用块，语法错误：{e}")
-            print(f"问题内容片段：{code_block[:100]}...")
-            continue
+        except SyntaxError:
+            # 如果直接解析失败，尝试使用正则表达式预处理
+            try:
+                # 使用正则表达式提取函数调用
+                calls = _extract_function_calls_regex(code_block)
+                all_calls.extend(calls)
+            except Exception as e:
+                print(f"正则表达式解析也失败：{e}")
+                print(f"问题内容片段（前200字符）：{repr(code_block[:200])}")
+                continue
         except Exception as e:
             print(f"解析过程中发生未知错误：{e}")
             continue
 
     return all_calls
+
+def _extract_function_calls_regex(code_block: str) -> List[Dict]:
+    """
+    使用正则表达式提取函数调用，特别处理多行字符串
+    """
+    # 匹配函数调用模式，包括处理多行字符串
+    pattern = r'(\w+(?:\.\w+)*)\s*\((.*?)\)'
+    
+    # 找到所有的函数调用
+    # 首先找到所有可能的函数调用边界
+    result = []
+    
+    # 更智能的函数调用解析器
+    calls = _parse_function_calls_smart(code_block)
+    for call in calls:
+        result.append(call)
+    
+    return result
+
+def _parse_function_calls_smart(code_block: str) -> List[Dict]:
+    """
+    智能解析函数调用，能够处理多行字符串和复杂的参数
+    """
+    result = []
+    i = 0
+    length = len(code_block)
+    
+    while i < length:
+        # 寻找函数名
+        func_match = re.search(r'\b([a-zA-Z_]\w*(?:\.[a-zA-Z_]\w*)*)\s*\(', code_block[i:])
+        if not func_match:
+            break
+            
+        func_start = i + func_match.start()
+        func_name = func_match.group(1)
+        paren_start = func_start + len(func_match.group()) - 1  # 定位到左括号
+        
+        # 找到匹配的右括号，考虑嵌套括号和字符串
+        paren_depth = 1
+        j = paren_start + 1
+        quote_char = None
+        escaped = False
+        
+        while j < length and paren_depth > 0:
+            char = code_block[j]
+            
+            if escaped:
+                escaped = False
+            elif char == '\\':
+                escaped = True
+            elif quote_char and char == quote_char:
+                quote_char = None
+            elif not quote_char and char in ['"', "'"]:
+                quote_char = char
+                # 检查是否是三引号
+                if j + 2 < length and code_block[j:j+3] in ['"""', "'''"]:
+                    quote_char = code_block[j:j+3]
+                    j += 2
+            elif quote_char == '"""' or quote_char == "'''":
+                if j + 2 < length and code_block[j:j+3] == quote_char:
+                    quote_char = None
+                    j += 2
+            elif not quote_char:
+                if char == '(':
+                    paren_depth += 1
+                elif char == ')':
+                    paren_depth -= 1
+            
+            j += 1
+        
+        if paren_depth == 0:
+            # 提取参数部分
+            args_str = code_block[paren_start + 1:j - 1]
+            
+            # 解析参数
+            args, kwargs = _parse_arguments(args_str)
+            
+            result.append({
+                'name': func_name,
+                'args': args,
+                'kwargs': kwargs
+            })
+            
+            i = j  # 移动到下一个可能的位置
+        else:
+            # 如果括号不匹配，移动到下一个可能的函数调用
+            i = func_start + 1
+    
+    return result
+
+def _parse_arguments(args_str: str) -> tuple[list, dict]:
+    """
+    解析函数参数字符串
+    """
+    args = []
+    kwargs = {}
+    
+    if not args_str.strip():
+        return args, kwargs
+    
+    # 智能分割参数，考虑嵌套结构和字符串
+    params = _smart_split_params(args_str)
+    
+    for param in params:
+        param = param.strip()
+        if '=' in param and not _is_in_string_or_brackets(param, '='):
+            # 这是一个关键字参数
+            eq_index = param.index('=')
+            key = param[:eq_index].strip()
+            value_str = param[eq_index + 1:].strip()
+            kwargs[key] = _evaluate_param(value_str)
+        else:
+            # 这是一个位置参数
+            args.append(_evaluate_param(param))
+    
+    return args, kwargs
+
+def _smart_split_params(params_str: str) -> list:
+    """
+    智能分割参数，考虑嵌套括号、列表、字典和字符串
+    """
+    result = []
+    current = ""
+    paren_depth = 0
+    bracket_depth = 0
+    brace_depth = 0
+    quote_char = None
+    escaped = False
+    
+    for char in params_str:
+        if escaped:
+            current += char
+            escaped = False
+        elif char == '\\':
+            current += char
+            escaped = True
+        elif quote_char and char == quote_char[0]:
+            # 检查是否是结束的引号
+            if quote_char in ['"""', "'''"]:  # 三引号
+                if len(current) >= 3 and current.endswith(quote_char[-3:]):
+                    # 检查当前是否是以三引号结尾
+                    if len(current) >= 3 and current[-3:] == quote_char:
+                        quote_char = None
+                        current += char
+                    else:
+                        current += char
+                else:
+                    current += char
+            else:  # 普通引号
+                quote_char = None
+                current += char
+        elif quote_char:
+            current += char
+        elif quote_char is None and char in ['"', "'"]:
+            # 检查是否是三引号开始
+            pos = len(current)
+            remaining = params_str[pos:pos+3]
+            if remaining.startswith('"""') or remaining.startswith("'''"):
+                quote_char = params_str[pos:pos+3]
+                current += quote_char
+            else:
+                quote_char = char
+                current += char
+        elif char == '(':
+            paren_depth += 1
+            current += char
+        elif char == ')':
+            paren_depth -= 1
+            current += char
+        elif char == '[':
+            bracket_depth += 1
+            current += char
+        elif char == ']':
+            bracket_depth -= 1
+            current += char
+        elif char == '{':
+            brace_depth += 1
+            current += char
+        elif char == '}':
+            brace_depth -= 1
+            current += char
+        elif char == ',' and paren_depth == 0 and bracket_depth == 0 and brace_depth == 0 and quote_char is None:
+            result.append(current.strip())
+            current = ""
+        else:
+            current += char
+    
+    if current.strip():
+        result.append(current.strip())
+    
+    return result
+
+def _is_in_string_or_brackets(s: str, target_pos: int) -> bool:
+    """
+    检查某个位置是否在字符串或括号内
+    """
+    quote_char = None
+    paren_depth = 0
+    bracket_depth = 0
+    brace_depth = 0
+    escaped = False
+    
+    for i, char in enumerate(s):
+        if i == target_pos:
+            return quote_char is not None or paren_depth > 0 or bracket_depth > 0 or brace_depth > 0
+        
+        if escaped:
+            escaped = False
+        elif char == '\\':
+            escaped = True
+        elif quote_char and char == quote_char[0]:
+            # 检查三引号结束
+            if quote_char in ['"""', "'''"] and i + 2 < len(s) and s[i:i+3] == quote_char:
+                quote_char = None
+            elif quote_char == char:
+                quote_char = None
+        elif quote_char is None and char in ['"', "'"]:
+            # 检查是否是三引号
+            if i + 2 < len(s) and s[i:i+3] in ['"""', "'''"]:
+                quote_char = s[i:i+3]
+            else:
+                quote_char = char
+        elif char == '(' and quote_char is None:
+            paren_depth += 1
+        elif char == ')' and quote_char is None:
+            paren_depth -= 1
+        elif char == '[' and quote_char is None:
+            bracket_depth += 1
+        elif char == ']' and quote_char is None:
+            bracket_depth -= 1
+        elif char == '{' and quote_char is None:
+            brace_depth += 1
+        elif char == '}' and quote_char is None:
+            brace_depth -= 1
+    
+    return False
+
+def _evaluate_param(param_str: str) -> Any:
+    """
+    尝试评估参数值
+    """
+    param_str = param_str.strip()
+    
+    # 处理三引号字符串
+    if param_str.startswith('"""') and param_str.endswith('"""') and len(param_str) >= 6:
+        return param_str[3:-3]
+    elif param_str.startswith("'''") and param_str.endswith("'''") and len(param_str) >= 6:
+        return param_str[3:-3]
+    
+    # 处理普通字符串
+    if (param_str.startswith('"') and param_str.endswith('"')) or \
+       (param_str.startswith("'") and param_str.endswith("'")):
+        return param_str[1:-1]
+    
+    # 尝试解析数字
+    try:
+        if '.' in param_str:
+            return float(param_str)
+        else:
+            return int(param_str)
+    except ValueError:
+        pass
+    
+    # 布尔值
+    if param_str.lower() == 'true':
+        return True
+    elif param_str.lower() == 'false':
+        return False
+    elif param_str.lower() == 'none' or param_str.lower() == 'null':
+        return None
+    
+    # 返回原字符串
+    return param_str
