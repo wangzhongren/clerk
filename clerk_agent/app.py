@@ -10,6 +10,12 @@ import openai
 import uuid
 from flask import request, jsonify, Response, stream_with_context
 
+import os
+
+# 设置 HTTP 和 HTTPS 代理
+os.environ['http_proxy'] = 'http://127.0.0.1:7897'
+os.environ['https_proxy'] = 'http://127.0.0.1:7897'
+
 # 获取当前目录
 current_dir = Path(os.getcwd());
 print(current_dir);
@@ -28,12 +34,12 @@ def register_tools():
             return read_file(filepath)
 
     if 'write_file' not in global_registry.get_all_functions():
-        @function_call(prompt="写入内容到文件", name="write_file")
+        @function_call(prompt="写入内容到文件，content 需要使用\"\"\"来传入多行", name="write_file")
         def write_file_tool(filepath: str, content: str):
             return write_file(filepath, content)
 
     if 'execute_shell' not in global_registry.get_all_functions():
-        @function_call(prompt="执行 Shell 命令（危险命令会被拦截）", name="execute_shell")
+        @function_call(prompt="执行 Shell 命令（危险命令会被拦截）,使用的是python的subprocess。", name="execute_shell")
         def execute_shell_tool(command: str):
             return execute_shell(command)
     
@@ -110,7 +116,7 @@ async def call_llm_stream(messages, config):
         )
         return stream
     except Exception as e:
-        raise Exception(f"LLM 调用失败: {str(e)}")
+        raise Exception(f"LLM 调用失败：{str(e)}")
 
 @app.route('/')
 def index():
@@ -178,7 +184,7 @@ def get_tasks():
         lines = content.split('\n')
         in_table = False
         for line in lines:
-            if line.strip().startswith('| 任务ID |'):
+            if line.strip().startswith('| 任务 ID |'):
                 in_table = True
                 continue
             if in_table and line.strip().startswith('| ') and not line.strip().startswith('|--------|'):
@@ -253,16 +259,21 @@ def update_config():
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/execute', methods=['POST'])
-def execute_task():  # 🔴 改为同步 def（关键！）
+def execute_task():
     """执行任务（ReAct 循环 + 流式传输）"""
     try:
         data = request.json
         task_id = data.get('task_id')
-        history = data.get("history",[])
-        user_input = data.get('input')
+        history = data.get("history", [])
         
-        if not task_id or not user_input:
-            return jsonify({"error": "缺少任务ID或输入内容"}), 400
+        if not task_id or not history:
+            return jsonify({"error": "缺少任务 ID 或对话历史"}), 400
+        
+        # 从 history 最后一条获取用户输入（不再依赖单独的 input 参数）
+        if not history or history[-1].get('role') != 'user':
+            return jsonify({"error": "对话历史最后一条必须是用户消息"}), 400
+        
+        user_input = history[-1].get('content')
         
         task_agent.log_to_task(task_id, {"type": "user_input", "content": user_input})
         
@@ -274,11 +285,11 @@ def execute_task():  # 🔴 改为同步 def（关键！）
         
         conversation_history = [
             {"role": "system", "content": system_prompt},
-        ]+ history + [{"role": "user", "content": user_input}]
+        ] + history
         max_iterations = 100
         iteration = 0
         
-        # 🔴 内部 async 生成器逻辑保持不变
+        # 内部 async 生成器逻辑
         async def _async_generate():
             nonlocal iteration, conversation_history
             while iteration < max_iterations:
@@ -315,14 +326,14 @@ def execute_task():  # 🔴 改为同步 def（关键！）
                             "result": result, "iteration": iteration
                         }
                         task_agent.log_to_task(task_id, log_entry)
-                        observation += f"执行 {call['name']} 的结果: {result}\n"
+                        observation += f"执行 {call['name']} 的结果：{result}\n"
                         yield f"data: {json.dumps({'type': 'function_result', 'function': call['name'], 'result': str(result)})}\n\n"
                     except Exception as e:
                         task_agent.log_to_task(task_id, {
                             "type": "function_call_error", "function": call['name'],
                             "error": str(e), "iteration": iteration
                         })
-                        observation += f"执行 {call['name']} 时出错: {str(e)}\n"
+                        observation += f"执行 {call['name']} 时出错：{str(e)}\n"
                         yield f"data: {json.dumps({'type': 'function_error', 'function': call['name'], 'error': str(e)})}\n\n"
                 
                 conversation_history.append({"role": "assistant", "content": llm_response})
@@ -335,7 +346,7 @@ def execute_task():  # 🔴 改为同步 def（关键！）
                 task_agent.complete_task(task_id, final_msg)
             yield f"data: {json.dumps({'type': 'task_complete'})}\n\n"
         
-        # 🔴 同步包装器：把 async generator 转为同步 generator
+        # 同步包装器：把 async generator 转为同步 generator
         def _sync_generate():
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
@@ -349,7 +360,7 @@ def execute_task():  # 🔴 改为同步 def（关键！）
             finally:
                 loop.close()
         
-        # 🔴 返回时用 stream_with_context 包装同步 generator
+        # 返回时用 stream_with_context 包装同步 generator
         return Response(
             stream_with_context(_sync_generate()),
             mimetype='text/event-stream'
@@ -402,14 +413,14 @@ def save_script_as_skill():
 
 @app.route('/api/summarize', methods=['POST'])
 async def summarize_conversation():
-    """总结对话历史，每50轮调用一次"""
+    """总结对话历史，每 50 轮调用一次"""
     try:
         data = request.json
         task_id = data.get('task_id')
         conversation_history = data.get('conversation_history', [])
         
         if not task_id:
-            return jsonify({"error": "缺少任务ID"}), 400
+            return jsonify({"error": "缺少任务 ID"}), 400
         
         # 构建总结提示
         history_text = "\n".join([
@@ -418,7 +429,7 @@ async def summarize_conversation():
         ])
         
         summary_prompt = f"""你是一个办公自动化助手，需要对以下对话历史进行总结。
-请按照以下格式输出Markdown：
+请按照以下格式输出 Markdown：
 
 ## 当前任务状态
 [简要描述当前任务的进展和状态]
@@ -470,7 +481,7 @@ async def call_llm(system_prompt, user_message, config):
         
         return response.choices[0].message.content
     except Exception as e:
-        raise Exception(f"LLM 调用失败: {str(e)}")
+        raise Exception(f"LLM 调用失败：{str(e)}")
 
 def main():
     """启动 Flask WebUI"""
@@ -489,7 +500,7 @@ def main():
         print("   (暂无技能)")
     
     print("\n🌐 WebUI 服务启动:")
-    print("   访问地址: http://localhost:5000")
+    print("   访问地址：http://localhost:5000")
     print("   按 Ctrl+C 停止服务")
     
     # 启动 Flask 应用

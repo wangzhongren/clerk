@@ -92,7 +92,7 @@ def execute_shell(command: str) -> Dict[str, Any]:
             encoding='utf-8',
             capture_output=True,
             text=True,
-            timeout=30          # 遵守 30 秒超时限制
+            timeout=300          # 遵守 300 秒超时限制
         )
         return {
             "stdout": result.stdout,
@@ -102,6 +102,6 @@ def execute_shell(command: str) -> Dict[str, Any]:
     except subprocess.TimeoutExpired:
         return {
             "stdout": "",
-            "stderr": "命令执行超时 (30秒)",
+            "stderr": "命令执行超时 (300 秒)",
             "returncode": -1
         }

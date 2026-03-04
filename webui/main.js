@@ -1,9 +1,9 @@
 // 核心 JS 逻辑
 let currentTaskId = null;
 let isProcessing = false;
-let currentAssistantMessageContent = null;
-let currentStreamingText = '';
-let lastPythonCode = ''; // 存储最近的 Python 代码
+let currentAssistantMessageContainer = null; // 存储整个助手消息容器
+let currentStreamingText = ''; // 用于累积 LLM token
+let hasFinalResponse = false; // 标记是否已收到最终响应
 const MAX_CONVERSATION_TURNS = 50; // 最大对话轮数
 
 // 从 localStorage 加载对话历史
@@ -50,7 +50,6 @@ function loadConversationHistory() {
 // 保存对话历史到 localStorage
 function saveConversationHistory() {
     try {
-        // 只保存最近的 MAX_CONVERSATION_TURNS 轮对话
         const trimmedHistory = conversationHistory.slice(-MAX_CONVERSATION_TURNS);
         localStorage.setItem('clerk_conversation_history', JSON.stringify(trimmedHistory));
     } catch (e) {
@@ -64,21 +63,36 @@ function renderSavedConversation() {
     container.innerHTML = '';
     
     conversationHistory.forEach(msg => {
-        addMessageToHistory(msg.sender, msg.message, false, true);
+        // 历史消息直接渲染，不触发流式状态
+        const div = document.createElement('div');
+        div.className = `message-container ${msg.sender}`;
+        const avatar = msg.sender === 'user' ? '我' : 'C';
+        div.innerHTML = `<div class="message-avatar">${avatar}</div><div class="message-content">${marked.parse(msg.message)}</div>`;
+        container.appendChild(div);
     });
+    
+    scrollToBottom();
 }
 
 // --- 工作台逻辑 ---
 async function submitTask() {
     if (isProcessing) return;
     const inputEl = document.getElementById('user-input');
+    const submitBtn = document.getElementById('submit-task');
     const text = inputEl.value.trim();
     if (!text) return;
 
+    // 立即禁用输入框和按钮
     addMessageToHistory('user', text);
     inputEl.value = '';
     isProcessing = true;
-    document.getElementById('submit-task').disabled = true;
+    submitBtn.disabled = true;
+    submitBtn.textContent = '执行中...';
+
+    // 重置状态
+    currentAssistantMessageContainer = null;
+    currentStreamingText = '';
+    hasFinalResponse = false;
 
     // 检查是否接近最大轮数限制
     let shouldSummarize = false;
@@ -95,7 +109,7 @@ async function submitTask() {
 原始用户请求：${text}`;
     }
 
-    // 1. 创建任务 (如果还没任务ID)
+    // 1. 创建任务 (如果还没任务 ID)
     if (!currentTaskId) {
         try {
             const resp = await fetch('/api/tasks', {
@@ -107,12 +121,13 @@ async function submitTask() {
             if (data.task_id) currentTaskId = data.task_id;
             else throw new Error(data.error);
         } catch (e) {
-            addMessageToHistory('assistant', '❌ 创建任务失败: ' + e.message);
+            addMessageToHistory('assistant', '❌ 创建任务失败：' + e.message);
             resetInputState(); return;
         }
     }
 
     // 2. 构建完整的对话历史（整段对话）
+    // 注意：conversationHistory 已经包含了最新的用户消息，无需再传 input
     const history = conversationHistory.map(msg => ({
         role: msg.sender === 'user' ? 'user' : 'assistant',
         content: msg.message
@@ -125,8 +140,8 @@ async function submitTask() {
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({
                 task_id: currentTaskId, 
-                input: enhancedInput,
                 history: history
+                // 不再传递 input 参数，后端从 history 最后一条获取
             })
         });
 
@@ -145,57 +160,215 @@ async function submitTask() {
                 if (line.startsWith('data: ')) {
                     const data = JSON.parse(line.slice(6));
                     if (data.type === 'llm_token') {
-                        addMessageToHistory('assistant', data.content, true);
-                        // 检测 Python 代码块
-                        if (data.content.includes('```python')) {
-                            lastPythonCode = '';
-                        }
-                        if (lastPythonCode !== undefined) {
-                            lastPythonCode += data.content;
-                        }
+                        // 累积 LLM token，稍后统一渲染
+                        currentStreamingText += data.content;
+                        renderCurrentStreamingText();
+                    } else if (data.type === 'function_result') {
+                        // 函数调用结果，创建独立块
+                        flushCurrentStreamingText(); // 先刷新累积的 LLM 文本
+                        addAssistantMessagePart('function', `执行 ${data.function} 的结果: ${data.result}`);
+                    } else if (data.type === 'function_error') {
+                        // 函数调用错误，创建独立块
+                        flushCurrentStreamingText(); // 先刷新累积的 LLM 文本
+                        addAssistantMessagePart('error', `执行 ${data.function} 时出错: ${data.error}`);
+                    } else if (data.type === 'observation') {
+                        // 观察结果，创建独立块
+                        flushCurrentStreamingText(); // 先刷新累积的 LLM 文本
+                        addAssistantMessagePart('observation', `Observation: ${data.content}`);
                     } else if (data.type === 'final_response') {
-                        addMessageToHistory('assistant', data.content, false);
-                        
+                        // 最终响应，刷新累积文本并添加最终响应
+                        flushCurrentStreamingText();
+                        addAssistantMessagePart('final', data.content);
+                        hasFinalResponse = true;
+                    } else if (data.type === 'iteration_start') {
+                        // 迭代开始，可以显示迭代信息
+                        flushCurrentStreamingText(); // 先刷新累积的 LLM 文本
+                        addAssistantMessagePart('info', `--- 迭代 ${data.iteration} ---`);
                     }
                 }
             }
         }
         
-        // 如果触发了总结，在下次对话开始时自动清理最旧的消息
-        if (shouldSummarize) {
-            // 不立即清空，而是标记下次需要清理
-            localStorage.setItem('clerk_needs_cleanup', 'true');
-        }
-        
     } catch (e) {
-        addMessageToHistory('assistant', '❌ 执行错误: ' + e.message);
+        addMessageToHistory('assistant', '❌ 执行错误：' + e.message);
     } finally {
+        // 确保最后的流式文本被保存
+        if (!hasFinalResponse && currentStreamingText) {
+            flushCurrentStreamingText();
+            // 如果没有收到 final_response，将累积的文本作为最终响应
+            conversationHistory.push({ sender: 'assistant', message: currentStreamingText });
+            checkAndCleanupHistory();
+            saveConversationHistory();
+        }
         resetInputState();
-        loadTasks(); // 刷新任务列表
+        loadTasks();
     }
 }
 
 function resetInputState() {
     isProcessing = false;
-    document.getElementById('submit-task').disabled = false;
-    currentAssistantMessageContent = null;
+    const submitBtn = document.getElementById('submit-task');
+    submitBtn.disabled = false;
+    submitBtn.textContent = '执行';
+    currentAssistantMessageContainer = null;
     currentStreamingText = '';
+    hasFinalResponse = false;
+}
+
+// 渲染当前累积的 LLM 流式文本（临时显示）
+function renderCurrentStreamingText() {
+    if (!currentAssistantMessageContainer) {
+        // 创建助手消息容器
+        const container = document.getElementById('conversation-history');
+        currentAssistantMessageContainer = document.createElement('div');
+        currentAssistantMessageContainer.className = 'message-container assistant';
+        currentAssistantMessageContainer.innerHTML = `<div class="message-avatar">C</div><div class="message-content"></div>`;
+        container.appendChild(currentAssistantMessageContainer);
+    }
+    
+    const contentDiv = currentAssistantMessageContainer.querySelector('.message-content');
+    // 找到或创建 LLM 流式文本的 div
+    let llmDiv = contentDiv.querySelector('.message-part-llm-temp');
+    if (!llmDiv) {
+        llmDiv = document.createElement('div');
+        llmDiv.className = 'message-part message-part-llm-temp';
+        llmDiv.style.fontSize = '12px';
+        llmDiv.style.lineHeight = '1.4';
+        llmDiv.style.color = '#666';
+        llmDiv.style.marginBottom = '8px';
+        llmDiv.style.padding = '6px 10px';
+        llmDiv.style.backgroundColor = '#f9f9f9';
+        llmDiv.style.borderLeft = '2px solid #ddd';
+        contentDiv.appendChild(llmDiv);
+    }
+    
+    // 更新 LLM 流式文本内容
+    llmDiv.innerHTML = marked.parse(currentStreamingText);
+    scrollToBottom();
+}
+
+// 刷新累积的 LLM 文本，将其转换为永久块
+function flushCurrentStreamingText() {
+    if (!currentStreamingText.trim()) return;
+    
+    if (!currentAssistantMessageContainer) {
+        // 如果还没有容器，先创建
+        const container = document.getElementById('conversation-history');
+        currentAssistantMessageContainer = document.createElement('div');
+        currentAssistantMessageContainer.className = 'message-container assistant';
+        currentAssistantMessageContainer.innerHTML = `<div class="message-avatar">C</div><div class="message-content"></div>`;
+        container.appendChild(currentAssistantMessageContainer);
+    }
+    
+    const contentDiv = currentAssistantMessageContainer.querySelector('.message-content');
+    // 移除临时的 LLM div
+    const tempLlmDiv = contentDiv.querySelector('.message-part-llm-temp');
+    if (tempLlmDiv) {
+        tempLlmDiv.remove();
+    }
+    
+    // 创建永久的 LLM 块
+    const llmDiv = document.createElement('div');
+    llmDiv.className = 'message-part message-part-llm';
+    llmDiv.style.fontSize = '12px';
+    llmDiv.style.lineHeight = '1.4';
+    llmDiv.style.color = '#666';
+    llmDiv.style.marginBottom = '8px';
+    llmDiv.style.padding = '6px 10px';
+    llmDiv.style.backgroundColor = '#f9f9f9';
+    llmDiv.style.borderLeft = '2px solid #ddd';
+    llmDiv.innerHTML = marked.parse(currentStreamingText);
+    contentDiv.appendChild(llmDiv);
+    
+    // 重置累积文本
+    currentStreamingText = '';
+    scrollToBottom();
+}
+
+// 添加助手消息的不同部分
+function addAssistantMessagePart(type, content) {
+    const container = document.getElementById('conversation-history');
+    
+    // 如果还没有助手消息容器，创建一个新的
+    if (!currentAssistantMessageContainer) {
+        currentAssistantMessageContainer = document.createElement('div');
+        currentAssistantMessageContainer.className = 'message-container assistant';
+        currentAssistantMessageContainer.innerHTML = `<div class="message-avatar">C</div><div class="message-content"></div>`;
+        container.appendChild(currentAssistantMessageContainer);
+    }
+    
+    const contentDiv = currentAssistantMessageContainer.querySelector('.message-content');
+    
+    // 根据类型创建不同的 div
+    const partDiv = document.createElement('div');
+    partDiv.className = `message-part message-part-${type}`;
+    
+    // 设置样式
+    if (type === 'final') {
+        // 最终响应使用正常字体
+        partDiv.style.fontSize = '14px';
+        partDiv.style.lineHeight = '1.6';
+        partDiv.style.marginBottom = '12px';
+        partDiv.innerHTML = marked.parse(content);
+        
+        // 将最终响应添加到历史记录
+        conversationHistory.push({ sender: 'assistant', message: content });
+        checkAndCleanupHistory();
+        saveConversationHistory();
+    } else {
+        // 其他类型使用小字体
+        partDiv.style.fontSize = '12px';
+        partDiv.style.lineHeight = '1.4';
+        partDiv.style.marginBottom = '8px';
+        partDiv.style.padding = '6px 10px';
+        
+        if (type === 'error') {
+            partDiv.style.color = '#d32f2f';
+            partDiv.style.backgroundColor = '#ffebee';
+            partDiv.style.borderLeft = '2px solid #f44336';
+        } else if (type === 'function') {
+            partDiv.style.color = '#1976d2';
+            partDiv.style.backgroundColor = '#e3f2fd';
+            partDiv.style.borderLeft = '2px solid #2196f3';
+        } else if (type === 'observation') {
+            partDiv.style.color = '#388e3c';
+            partDiv.style.backgroundColor = '#e8f5e8';
+            partDiv.style.borderLeft = '2px solid #4caf50';
+        } else if (type === 'info') {
+            partDiv.style.color = '#7b1fa2';
+            partDiv.style.backgroundColor = '#f3e5f5';
+            partDiv.style.borderLeft = '2px solid #9c27b0';
+            partDiv.style.fontWeight = 'bold';
+        } else if (type === 'llm') {
+            partDiv.style.color = '#666';
+            partDiv.style.backgroundColor = '#f9f9f9';
+            partDiv.style.borderLeft = '2px solid #ddd';
+        }
+        
+        if (type === 'llm') {
+            partDiv.innerHTML = marked.parse(content);
+        } else {
+            partDiv.textContent = content;
+        }
+    }
+    
+    contentDiv.appendChild(partDiv);
+    scrollToBottom();
 }
 
 function scrollToBottom() {
     const container = document.getElementById('conversation-history');
     if (container) {
-        // 使用 requestAnimationFrame 确保 DOM 已经渲染完毕
         requestAnimationFrame(() => {
             container.scrollTo({
                 top: container.scrollHeight,
-                behavior: 'smooth' // 平滑滚动，演示效果更好
+                behavior: 'smooth'
             });
         });
     }
 }
 
-function addMessageToHistory(sender, message, isStreaming = false, isFromStorage = false) {
+function addMessageToHistory(sender, message, isStreaming = false) {
     const container = document.getElementById('conversation-history');
     
     if (sender === 'user') {
@@ -204,113 +377,46 @@ function addMessageToHistory(sender, message, isStreaming = false, isFromStorage
         div.innerHTML = `<div class="message-avatar">我</div><div class="message-content">${marked.parse(message)}</div>`;
         container.appendChild(div);
         
-        // 只有新消息才添加到历史记录（不是从存储加载的）
-        if (!isFromStorage) {
-            conversationHistory.push({ sender: 'user', message: message });
-            
-            // 检查是否需要清理最旧的消息
-            checkAndCleanupHistory();
-            saveConversationHistory();
-        }
+        // 添加到历史记录
+        conversationHistory.push({ sender: 'user', message: message });
+        checkAndCleanupHistory();
+        saveConversationHistory();
         
-        currentAssistantMessageContent = null;
+        currentAssistantMessageContainer = null;
         currentStreamingText = '';
+        hasFinalResponse = false;
     } else {
-        if (!currentAssistantMessageContent) {
-            const div = document.createElement('div');
-            div.className = 'message-container assistant';
-            div.innerHTML = `<div class="message-avatar">C</div><div class="message-content"></div>`;
-            container.appendChild(div);
-            currentAssistantMessageContent = div.querySelector('.message-content');
-            currentStreamingText = '';
-        }
+        // 对于非流式的完整消息（如错误消息），直接创建完整消息
+        const div = document.createElement('div');
+        div.className = 'message-container assistant';
+        div.innerHTML = `<div class="message-avatar">C</div><div class="message-content">${marked.parse(message)}</div>`;
+        container.appendChild(div);
         
-        if (isStreaming) {
-            currentStreamingText += message;
-            currentAssistantMessageContent.innerHTML = marked.parse(currentStreamingText);
-        } else {
-            // 完整消息
-            currentAssistantMessageContent.innerHTML = marked.parse(message);
-            currentAssistantMessageContent = null;
-            currentStreamingText = '';
-            
-            // 只有新消息才添加到历史记录
-            if (!isFromStorage) {
-                debugger
-                conversationHistory.push({ sender: 'assistant', message: message });
-                
-                // 检查是否需要清理最旧的消息
-                checkAndCleanupHistory();
-                saveConversationHistory();
-            }
-        }
+        // 添加到历史记录
+        conversationHistory.push({ sender: 'assistant', message: message });
+        checkAndCleanupHistory();
+        saveConversationHistory();
+        
+        currentAssistantMessageContainer = null;
+        currentStreamingText = '';
+        hasFinalResponse = false;
     }
     scrollToBottom();
 }
 
-// 检查并清理对话历史（静默移除最旧的消息）
+// 检查并清理对话历史
 function checkAndCleanupHistory() {
-    // 检查是否之前触发过总结，需要清理
     const needsCleanup = localStorage.getItem('clerk_needs_cleanup') === 'true';
     
     if (needsCleanup && conversationHistory.length > 0) {
-        // 静默移除最开始的几条消息（保留最后 MAX_CONVERSATION_TURNS - 2 条）
         const keepCount = Math.max(0, MAX_CONVERSATION_TURNS - 2);
         conversationHistory = conversationHistory.slice(-keepCount);
         localStorage.removeItem('clerk_needs_cleanup');
         saveConversationHistory();
-        
-        // 重新渲染对话历史（可选，通常不需要）
-        // renderSavedConversation();
     }
-    // 始终确保不超过最大轮数
     else if (conversationHistory.length > MAX_CONVERSATION_TURNS) {
         conversationHistory = conversationHistory.slice(-(MAX_CONVERSATION_TURNS));
         saveConversationHistory();
-    }
-}
-
-// --- 脚本保存功能 ---
-function showSaveScriptModal(scriptContent) {
-    document.getElementById('script-content').value = scriptContent;
-    document.getElementById('saveScriptModal').style.display = 'flex';
-}
-
-function closeSaveScriptModal() {
-    document.getElementById('saveScriptModal').style.display = 'none';
-}
-
-async function saveScriptAsSkill() {
-    const skillName = document.getElementById('new-skill-name').value.trim();
-    const skillDescription = document.getElementById('new-skill-description').value.trim();
-    const scriptContent = document.getElementById('script-content').value;
-    
-    if (!skillName) {
-        alert('请输入技能名称');
-        return;
-    }
-    
-    try {
-        const response = await fetch('/api/save_script_as_skill', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({
-                skill_name: skillName,
-                skill_description: skillDescription,
-                script_content: scriptContent
-            })
-        });
-        
-        const data = await response.json();
-        if (data.error) {
-            alert('保存失败: ' + data.error);
-        } else {
-            alert('保存成功: ' + data.message);
-            closeSaveScriptModal();
-            loadSkills(); // 刷新技能列表
-        }
-    } catch (error) {
-        alert('保存失败: ' + error.message);
     }
 }
 
@@ -334,7 +440,7 @@ async function loadSkills() {
             `;
             listEl.appendChild(card);
         });
-    } catch (e) { listEl.innerHTML = '加载失败: ' + e.message; }
+    } catch (e) { listEl.innerHTML = '加载失败：' + e.message; }
 }
 
 async function editSkill(name) {
@@ -342,7 +448,7 @@ async function editSkill(name) {
         const resp = await fetch(`/api/skills/${name}`);
         const data = await resp.json();
         openSkillModal(name, data.content);
-    } catch (e) { alert('加载失败: ' + e.message); }
+    } catch (e) { alert('加载失败：' + e.message); }
 }
 
 async function saveSkill() {
@@ -359,7 +465,7 @@ async function saveSkill() {
         alert('保存成功');
         closeSkillModal();
         loadSkills();
-    } catch (e) { alert('保存失败: ' + e.message); }
+    } catch (e) { alert('保存失败：' + e.message); }
 }
 
 async function deleteSkill() {
@@ -369,7 +475,7 @@ async function deleteSkill() {
         await fetch(`/api/skills/${name}`, {method: 'DELETE'});
         closeSkillModal();
         loadSkills();
-    } catch (e) { alert('删除失败: ' + e.message); }
+    } catch (e) { alert('删除失败：' + e.message); }
 }
 
 function openSkillModal(name='', content='') {
@@ -414,7 +520,7 @@ async function viewTaskDetail(taskId) {
         const resp = await fetch(`/api/tasks/${taskId}`);
         const task = await resp.json();
         
-        let logsHtml = '<pre style="background:var(--google-gray-100); padding:10px; border-radius:4px; overflow-x:auto;">';
+        let logsHtml = '<pre style="background:#f4f4f4; padding:10px; border-radius:4px; overflow-x:auto;">';
         if(task.logs && task.logs.length > 0) {
             task.logs.forEach(log => {
                 logsHtml += `[${log.timestamp}] ${JSON.stringify(log.entry)}\n`;
@@ -431,7 +537,7 @@ async function viewTaskDetail(taskId) {
             <p><strong>日志:</strong></p>
             ${logsHtml}
         `;
-    } catch (e) { contentEl.innerHTML = '加载详情失败: ' + e.message; }
+    } catch (e) { contentEl.innerHTML = '加载详情失败：' + e.message; }
 }
 function closeTaskDetailModal() { document.getElementById('taskDetailModal').style.display = 'none'; }
 
@@ -460,5 +566,5 @@ async function saveConfig(e) {
             body: JSON.stringify(config)
         });
         alert('配置已保存');
-    } catch (e) { alert('保存失败: ' + e.message); }
+    } catch (e) { alert('保存失败：' + e.message); }
 }

@@ -19,35 +19,30 @@
         .nav-item:hover { color: var(--white); }
 
         /* --- 主容器 --- */
-        .main { flex: 1; display: flex; flex-direction: column; overflow: hidden; position: relative; }
-        header { height: 72px; border-bottom: 1px solid var(--border); display: flex; align-items: center; padding: 0 40px; background: var(--white); z-index: 10; }
+        .main {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            overflow: hidden;
+        }
+        header { height: 72px; border-bottom: 1px solid var(--border); display: flex; align-items: center; padding: 0 40px; background: var(--white); z-index: 10; flex-shrink: 0; }
         header h2 { font-size: 15px; font-weight: 700; margin: 0; }
 
         .tab-content { display: none; flex: 1; padding: 40px; overflow-y: auto; }
         .tab-content.active { display: flex; flex-direction: column; }
 
-        .main {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    height: 100vh; /* 锁定视口高度 */
-    overflow: hidden; /* 禁止全局滚动 */
-}
-
+        /* --- 工作台布局 --- */
         #workbench.tab-content.active {
-    display: flex;
-    flex-direction: column;
-    height: calc(100vh - 72px); /* 减去 header 的高度 */
-    padding: 20px 40px;
-    overflow: hidden; /* 容器本身不滚动，让内部历史记录滚动 */
-}
+            padding: 20px 40px;
+            overflow: hidden;
+        }
+
         /* --- 对话工作台核心样式 --- */
         #conversation-history {
-            flex: 1; /* 自动占据除输入框外的所有空间 */
-            overflow-y: auto; /* 关键：只有这里产生滚动条 */
-            padding-bottom: 120px; /* 为底部固定输入框留出呼吸空间 */
-            
-            /* 强制显示滚动条样式（可选，便于调试） */
+            flex: 1;
+            overflow-y: auto;
+            padding-bottom: 120px;
             scrollbar-width: thin;
             scrollbar-color: var(--black) var(--white);
         }
@@ -58,6 +53,7 @@
             align-items: flex-start; 
             gap: 16px; 
             width: 100%;
+            margin-bottom: 24px;
         }
 
         /* 用户消息：头像在右，内容在左，整体靠右 */
@@ -100,12 +96,19 @@
         .input-group input { flex: 1; border: none; padding: 18px 24px; font-size: 15px; outline: none; }
         .input-group button { background: var(--black); color: var(--white); border: none; padding: 0 35px; font-weight: 700; cursor: pointer; transition: 0.2s; }
         .input-group button:hover { opacity: 0.8; }
+        .input-group button:disabled { background: #ccc; cursor: not-allowed; opacity: 0.6; }
 
         /* --- 技能矩阵 --- */
         #skills-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 1px; background: var(--border); border: 1px solid var(--border); margin-top: 20px; }
         .skill-card { background: #fff; padding: 30px; height: 180px; display: flex; flex-direction: column; justify-content: space-between; }
         .btn-outline { border: 1px solid var(--black); background: transparent; padding: 8px 16px; font-size: 12px; font-weight: 700; cursor: pointer; }
         .btn-black { background: var(--black); color: var(--white); border: none; padding: 12px 30px; font-weight: 700; cursor: pointer; }
+        
+        /* --- Badge 状态标签样式 (新增) --- */
+        .badge { display: inline-block; padding: 4px 10px; border-radius: 12px; font-size: 11px; font-weight: 700; }
+        .badge-success { background: #d4edda; color: #155724; }
+        .badge-danger { background: #f8d7da; color: #721c24; }
+        .badge-warning { background: #fff3cd; color: #856404; }
 
         /* --- 弹窗 --- */
         .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(255,255,255,0.98); z-index: 9999; align-items: center; justify-content: center; }
@@ -171,7 +174,7 @@
     <div class="modal" id="skillModal">
         <div class="modal-content">
             <h3 style="margin:0; font-weight:700;">能力编辑器</h3>
-            <input type="text" id="skill-name" placeholder="唯一标识符 (例如: web_search)" style="width:100%; border:none; border-bottom:1px solid #000; padding:12px 0; margin-top:25px; outline:none; font-size:18px;">
+            <input type="text" id="skill-name" placeholder="唯一标识符 (例如：web_search)" style="width:100%; border:none; border-bottom:1px solid #000; padding:12px 0; margin-top:25px; outline:none; font-size:18px;">
             <textarea id="skill-content" rows="14" placeholder="# 请在此输入 Python 实现代码..."></textarea>
             <div style="display:flex; justify-content:flex-end; gap:15px;">
                 <button id="delete-skill-btn" class="btn-outline" style="color:red; border-color:red" onclick="deleteSkill()">彻底删除</button>
