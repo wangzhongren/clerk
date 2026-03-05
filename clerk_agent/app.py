@@ -13,8 +13,8 @@ from flask import request, jsonify, Response, stream_with_context
 import os
 
 # 设置 HTTP 和 HTTPS 代理
-# os.environ['http_proxy'] = 'http://127.0.0.1:7897'
-# os.environ['https_proxy'] = 'http://127.0.0.1:7897'
+os.environ['http_proxy'] = 'http://127.0.0.1:7897'
+os.environ['https_proxy'] = 'http://127.0.0.1:7897'
 
 # 获取当前目录
 current_dir = Path(os.getcwd());
@@ -281,7 +281,7 @@ def execute_task():
         if not config.get('api_key'):
             return jsonify({"error": "未配置 API Key，请先在设置中配置"}), 400
         
-        system_prompt = worker_agent.get_system_prompt() + get_system_prompt()
+        system_prompt = worker_agent.get_system_prompt(get_system_prompt())
         
         conversation_history = [
             {"role": "system", "content": system_prompt},
