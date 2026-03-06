@@ -13,8 +13,8 @@ from flask import request, jsonify, Response, stream_with_context
 import os
 
 # 设置 HTTP 和 HTTPS 代理
-# os.environ['http_proxy'] = 'http://127.0.0.1:7897'
-# os.environ['https_proxy'] = 'http://127.0.0.1:7897'
+os.environ['http_proxy'] = 'http://127.0.0.1:7897'
+os.environ['https_proxy'] = 'http://127.0.0.1:7897'
 
 # 获取当前目录
 current_dir = Path(os.getcwd());
@@ -23,7 +23,7 @@ print(current_dir);
 # 导入必要的模块
 from tagcall import function_call, get_system_prompt, parse_function_calls, global_registry
 from clerk_agent.agents import TaskAgent, SkillAgent, WorkerAgent
-from clerk_agent.tools import read_file, write_file, execute_shell
+from clerk_agent.tools import execute_shell_sync, read_file, write_file, execute_shell
 
 # 注册工具函数到 TagCall（只注册一次）
 def register_tools():
@@ -34,14 +34,31 @@ def register_tools():
             return read_file(filepath)
 
     if 'write_file' not in global_registry.get_all_functions():
-        @function_call(prompt="写入内容到文件，content 需要使用\"\"\"来传入多行", name="write_file")
+        @function_call(prompt="写入内容到文件", name="write_file")
         def write_file_tool(filepath: str, content: str):
             return write_file(filepath, content)
 
     if 'execute_shell' not in global_registry.get_all_functions():
-        @function_call(prompt="执行 Shell 命令（危险命令会被拦截）,使用的是python的subprocess。", name="execute_shell")
+        @function_call(prompt="""执行跨平台 Shell 命令。
+1. **阻塞规避策略**：
+   - Linux/macOS: 使用 `&` 结尾或 `nohup ... &` 实现后台运行。
+   - Windows (CMD): 使用 `start /B [command]` 异步启动。
+   - Windows (PowerShell): 使用 `Start-Job -ScriptBlock { [command] }`。
+2. **严禁阻塞**：禁止执行无终止条件的命令（如 `ping` 不带次数限制、`top`、`tail -f`）。
+3. **路径兼容**：所有路径必须用双引号包裹，且注意 Windows 使用 `\` (需要转义为 `\\`)，Linux 使用 `/`。
+4. **静默执行**：长耗时任务请务必将输出重定向（如 `> output.log 2>&1`），严禁让主进程等待返回结果。""")
         def execute_shell_tool(command: str):
             return execute_shell(command)
+    
+    if 'execute_shell_sync' not in global_registry.get_all_functions():
+        @function_call(prompt="""同步执行短时 Shell 命令。
+    1. **使用场景**：仅用于能立即结束的操作（如 `ls`, `dir`, `git status`, `pip list`）。
+    2. **强制限制**：此工具执行时间上限为 30 秒，超时会被系统强行中断。
+    3. **严禁后台逻辑**：不要在此工具中使用 `&`、`start /B` 或 `Start-Job`，因为这些会导致获取不到预期的返回结果。
+    4. **获取反馈**：命令完成后会立即返回完整 stdout 输出。
+    5. **路径规范**：Windows 下路径需转义，所有路径建议用双引号包裹。""", name="execute_shell_sync")
+        def execute_shell_sync_tool(command: str):
+            return execute_shell_sync(command)
     
     # 新增：更新自我设定
     if 'update_self_profile' not in global_registry.get_all_functions():
@@ -54,6 +71,7 @@ def register_tools():
         @function_call(prompt="更新用户画像、偏好设置和个人信息", name="update_user_profile")
         def update_user_profile_tool(content: str):
             return update_user_profile(content)
+    
 
 def update_self_profile(content: str) -> str:
     """更新 self.md 文件"""
@@ -111,7 +129,7 @@ async def call_llm_stream(messages, config):
             model=config.get('model', 'gpt-4o-mini'),
             messages=messages,
             temperature=0.7,
-            max_tokens=2000,
+            # max_tokens=2000,
             stream=True
         )
         return stream
@@ -281,8 +299,9 @@ def execute_task():
         if not config.get('api_key'):
             return jsonify({"error": "未配置 API Key，请先在设置中配置"}), 400
         
-        system_prompt = worker_agent.get_system_prompt(get_system_prompt())
+        system_prompt = worker_agent.get_system_prompt(get_system_prompt());
         
+        print(system_prompt);
         conversation_history = [
             {"role": "system", "content": system_prompt},
         ] + history
@@ -309,6 +328,20 @@ def execute_task():
                 })
                 
                 function_calls = parse_function_calls(llm_response)
+                
+                # 检查是否解析失败
+                if len(function_calls) == 1 and 'error' in function_calls[0]:
+                    error_msg = function_calls[0]['error']
+                    # 将错误信息作为观察结果反馈给 AI
+                    observation = f"函数调用解析失败: {error_msg}"
+                    yield f"data: {json.dumps({'type': 'function_error', 'function': 'parse_error', 'error': error_msg})}\n\n"
+                    
+                    # 添加到对话历史，让 AI 重新生成
+                    conversation_history.append({"role": "assistant", "content": llm_response})
+                    conversation_history.append({"role": "system", "content": f"Observation: {observation}"})
+                    yield f"data: {json.dumps({'type': 'observation', 'content': observation})}\n\n"
+                    continue
+                
                 if not function_calls:
                     yield f"data: {json.dumps({'type': 'final_response', 'content': llm_response})}\n\n"
                     task_agent.complete_task(task_id, "")
@@ -337,7 +370,7 @@ def execute_task():
                         yield f"data: {json.dumps({'type': 'function_error', 'function': call['name'], 'error': str(e)})}\n\n"
                 
                 conversation_history.append({"role": "assistant", "content": llm_response})
-                conversation_history.append({"role": "user", "content": f"Observation: {observation.strip()}"})
+                conversation_history.append({"role": "system", "content": f"Observation: {observation.strip()}"})
                 yield f"data: {json.dumps({'type': 'observation', 'content': observation.strip()})}\n\n"
             
             if iteration >= max_iterations:
@@ -476,7 +509,7 @@ async def call_llm(system_prompt, user_message, config):
                 {"role": "user", "content": user_message}
             ],
             temperature=0.7,
-            max_tokens=2000
+            # max_tokens=2000
         )
         
         return response.choices[0].message.content

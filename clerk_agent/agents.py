@@ -12,8 +12,8 @@ class TaskAgent:
     """任务管理器 - 负责维护 tasks.md 和 /tasks/ 目录"""
     
     def __init__(self):
-        self.tasks_index_path = Path(__file__).parent / "tasks.md"
-        self.tasks_dir = Path(__file__).parent / "tasks"
+        self.tasks_index_path = Path(os.getcwd())/ "tasks.md"
+        self.tasks_dir = Path(os.getcwd()) / "tasks"
         self.tasks_dir.mkdir(exist_ok=True)
     
     def create_task(self, description: str) -> str:
@@ -171,12 +171,16 @@ class WorkerAgent:
         if not p.exists():
             return "  (Tree empty: No skills distilled yet)"
         
+        # 获取父目录名称作为根节点
+        root_name = p.name
+        tree_str += f"[{root_name}]\n"
+        
         # 过滤掉隐藏文件，只展示文件夹和 .md 手册
         items = sorted([x for x in p.iterdir() if not x.name.startswith('.') and (x.is_dir() or x.suffix == '.md')])
         
-        if not items and indent == "":
-            return "  (Root empty: Waiting for first skill deposition)"
-
+        if not items:
+            return f"  (Root empty: Waiting for first skill deposition)"
+        
         for i, item in enumerate(items):
             is_last = (i == len(items) - 1)
             connector = "└── " if is_last else "├── "
@@ -243,13 +247,17 @@ class WorkerAgent:
 4. **反馈 (Observe)**: 基于 Stdout 事实进行逻辑推进。
 5. **进化 (Distill)**: **【重要】** 成功后，创建对应的 `./skills/` 目录，保存手册与脚本。
 
+##目录要求
+技能全部都存入 ./skills 里面
+脚本全部存入 ./scripts 里面
+
 ## 5. Output Format (规范示例)
 
 ### [Thought]
 识别为“财务分析”领域任务。检索路径：`./skills/Finance/`。发现匹配技能 `tax_tool.md`。计划调用脚本执行。
 
 ### [Action]
-<function-call>execute_command(cmd="python3 ./scripts/Finance/tax_tool.py")</function-call>
+<function-call><工具名称></工具名称></function-call>
 
 ### [Response]
 (基于真实数据呈现结果)

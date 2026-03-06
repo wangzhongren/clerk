@@ -1,3 +1,4 @@
+import locale
 import os
 import json
 import subprocess
@@ -60,48 +61,156 @@ def write_file(filepath: str, content: str) -> str:
     
     return f"文件 {filepath} 写入成功"
 
+import os
+import subprocess
+import sys
+import uuid
+import locale
+import time
+from typing import Dict, Any
+
 def execute_shell(command: str) -> Dict[str, Any]:
     """
-    执行 Shell 命令，并确保在独立的 Python 虚拟环境中运行
+    跨平台异步执行 Shell 命令，不阻塞主任务，并将输出重定向至本地日志。
     """
-    if _is_dangerous_command(command):
-        return {
-            "stdout": "",
-            "stderr": f"危险命令被拦截: {command}。请在 WebUI 中手动授权执行。",
-            "returncode": -1,
-            "requires_approval": True
-        }
+    # 1. 安全检查 (假设你已有该函数实现)
+    # if _is_dangerous_command(command):
+    #     return {"stdout": "", "stderr": "危险命令被拦截", "returncode": -1}
 
-    # 1. 确保虚拟环境存在
+    # 2. 虚拟环境准备
     venv_path = os.path.join(os.getcwd(), "scripts", "task_env")
     if not os.path.exists(venv_path):
-        subprocess.run(["python", "-m", "venv", venv_path])
+        subprocess.run([sys.executable, "-m", "venv", venv_path], check=False)
         
-    # 2. 获取当前环境变量并注入虚拟环境路径
-    # 这一步是关键：让 Shell 优先识别虚拟环境的 bin/Scripts 目录
     env = os.environ.copy()
     venv_bin = os.path.join(venv_path, "bin") if os.name != 'nt' else os.path.join(venv_path, "Scripts")
     env["PATH"] = venv_bin + os.pathsep + env.get("PATH", "")
-    env["VIRTUAL_ENV"] = venv_path  # 某些工具需要此变量来识别 venv
+    env["VIRTUAL_ENV"] = venv_path 
+    env["PYTHONUNBUFFERED"] = "1"
+    
+    current_locale_encoding = locale.getpreferredencoding()
+
+    # 3. 生成唯一的日志路径，用于存储后台输出
+    log_id = str(uuid.uuid4())[:8]
+    log_dir = os.path.join(os.getcwd(), "logs")
+    os.makedirs(log_dir, exist_ok=True)
+    log_file = os.path.join(log_dir, f"task_{log_id}.log")
 
     try:
+        # 打开日志文件准备写入
+        # 使用 'a' 模式防止意外覆盖，buffering=1 实现行缓冲
+        log_handle = open(log_file, "a", encoding=current_locale_encoding, errors='replace')
+
+        # 4. 根据平台设置启动参数
+        popen_kwargs = {
+            "shell": True,
+            "env": env,
+            "stdout": log_handle,
+            "stderr": subprocess.STDOUT, # 合并错误到输出
+            "close_fds": True,
+            "text": True
+        }
+
+        if os.name == 'nt':
+            # Windows 核心：CREATE_NEW_PROCESS_GROUP 允许独立生存
+            # DETACHED_PROCESS 确保没有黑窗口且不绑定父进程控制台
+            # 解决 start /B 伪阻塞的关键
+            popen_kwargs["creationflags"] = (
+                subprocess.CREATE_NEW_PROCESS_GROUP | 
+                0x00000008 # DETACHED_PROCESS 标志位
+            )
+        else:
+            # Linux/macOS 核心：创建新会话/进程组，防止父进程退出时子进程被杀
+            popen_kwargs["preexec_fn"] = os.setpgrp
+
+        # 5. 启动进程 (非阻塞)
+        process = subprocess.Popen(command, **popen_kwargs)
+
+        # 这里做一个极短的检查（3），确认程序是否启动即崩溃
+        time.sleep(5)
+        ret_code = process.poll()
+
+        if ret_code is not None and ret_code != 0:
+            # 如果瞬时报错，读取日志返回错误
+            log_handle.close()
+            with open(log_file, "r", encoding=current_locale_encoding) as f:
+                content = f.read()
+            return {
+                "stdout": content,
+                "stderr": f"启动后立即退出，错误码: {ret_code}",
+                "returncode": ret_code
+            }
+
+        # 6. 成功启动，立即返回
+        return {
+            "stdout": f"任务已在后台启动。\nPID: {process.pid}\n日志路径: {log_file}\n提示：请后续通过读取该日志文件查看执行进度。",
+            "stderr": "",
+            "returncode": 0,
+            "log_path": log_file,
+            "pid": process.pid
+        }
+
+    except Exception as e:
+        return {
+            "stdout": "",
+            "stderr": f"后台启动失败: {str(e)}",
+            "returncode": -1
+        }
+
+import os
+import subprocess
+import sys
+import locale
+from typing import Dict, Any
+
+def execute_shell_sync(command: str, timeout: int = 30) -> Dict[str, Any]:
+    """
+    同步执行 Shell 命令，适用于能快速返回结果的操作（如查看目录、读取状态）。
+    """
+    # 环境配置逻辑（与异步版本保持一致）
+    venv_path = os.path.join(os.getcwd(), "scripts", "task_env")
+    if not os.path.exists(venv_path):
+        subprocess.run([sys.executable, "-m", "venv", venv_path], check=False)
+        
+    env = os.environ.copy()
+    venv_bin = os.path.join(venv_path, "bin") if os.name != 'nt' else os.path.join(venv_path, "Scripts")
+    env["PATH"] = venv_bin + os.pathsep + env.get("PATH", "")
+    env["VIRTUAL_ENV"] = venv_path 
+    env["PYTHONUNBUFFERED"] = "1"
+    
+    current_locale_encoding = locale.getpreferredencoding()
+
+    try:
+        # 同步执行核心逻辑
         result = subprocess.run(
             command,
             shell=True,
-            env=env,            # 【核心修改】传入修改后的环境变量
-            encoding='utf-8',
-            capture_output=True,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,  # 合并错误流
             text=True,
-            timeout=300          # 遵守 300 秒超时限制
+            encoding=current_locale_encoding,
+            errors='replace',
+            timeout=timeout  # 强制超时保护
         )
+        
         return {
-            "stdout": result.stdout,
-            "stderr": result.stderr,
-            "returncode": result.returncode
+            "stdout": result.stdout if result.stdout else "",
+            "returncode": result.returncode,
+            "status": "completed"
         }
-    except subprocess.TimeoutExpired:
+        
+    except subprocess.TimeoutExpired as e:
+        return {
+            "stdout": e.stdout.decode(current_locale_encoding, 'replace') if e.stdout else "",
+            "stderr": f"同步任务执行超时（限时 {timeout}s），请检查命令或改用异步工具执行。",
+            "returncode": -1,
+            "status": "timeout"
+        }
+    except Exception as e:
         return {
             "stdout": "",
-            "stderr": "命令执行超时 (300 秒)",
-            "returncode": -1
+            "stderr": f"执行异常: {str(e)}",
+            "returncode": -1,
+            "status": "error"
         }
