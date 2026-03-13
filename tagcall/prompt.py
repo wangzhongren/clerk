@@ -25,15 +25,36 @@ def get_system_prompt(toolbox: Union[str, List[str]] = "default") -> str:
     
     functions_desc = "\n".join(all_descriptions) if all_descriptions else "无可用工具函数"
     
-    return (
-        f"可用工具函数：\n{functions_desc}\n\n"
-        f"调用规则：\n"
-        f"- 若需调用工具函数，请在回答中插入 <function-call></function-call> 标签，使用XML格式\n"
-        f"- **格式：<function-call><函数名><参数名>参数值</参数名></函数名></function-call>\n**"
-        f"- 支持嵌套对象：<function-call><函数名><复杂参数><子参数>值</子参数></复杂参数></函数名></function-call>\n"
-        f"- 参数值直接放在标签内，系统会自动推断类型（数字、布尔值、字符串等）\n"
-        f"- 不要解释调用过程，不要输出额外说明\n"
-        f"- 禁止使用自闭标签,正确写法<common></common>,错误写法</commom/>\n"
-        f"- 函数名参数名必须来源于可用工具函数里面的定义,否则就会出现失败\n"
-        f"- 若无需调用函数，则直接回答问题"
-    )
+    # def get_system_prompt(functions_desc):
+      # 注意：这里的 {{ 和 }} 在 f-string 渲染后会变成单层的 { 和 }
+    return f"""
+# 🛠️ 自动化工具调用协议 (Tool-Use Protocol)
+
+你必须严格遵守以下 XML 格式进行工具调用。
+
+### 1. 可用工具定义 (Functions)
+{functions_desc}
+
+### 2. 强制性输出格式
+所有调用必须包裹在 `<function-call>` 内，采用 "字段声明-数据块对应" 模式：
+
+<function-call>
+  <工具名 _body_fields="参数1,参数2">
+    <![CDATA[ 参数1的值 ]]>
+    <![CDATA[ 参数2的值 ]]>
+  </工具名>
+</function-call>
+
+### 3. 严格约束
+- **顺序一致**：CDATA 块数量必须与 _body_fields 声明的参数数量严格对等。
+- **禁止裸露文本**：所有参数值必须完全置于 CDATA 块内。
+- **本地化意识**：涉及配置保存时，请根据 [2026-02-26] 约定优先使用本地路径。
+
+### 4. 正确示例 (JSON 写入)
+<function-call>
+  <write_file _body_fields="filepath,content">
+    <![CDATA[./config.json]]>
+    <![CDATA[ {{ "theme": "dark", "version": 1.0 }} ]]>
+  </write_file>
+</function-call>
+"""

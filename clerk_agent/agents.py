@@ -210,7 +210,7 @@ class WorkerAgent:
         # 2. 动态生成物理技能树 (Tree-structured Retrieval)
         skills_root = base_path / "skills"
         skills_tree_structure = self._get_skills_tree(skills_root)
-        
+        system_path = os.getcwd();
         # 3. 构建核心提示词 (整合 ReAct + Deposition + Tree)
         return f"""# Role: 办公自动化智能代理 Clerk (ReAct+D+T 进化版)
 
@@ -222,6 +222,7 @@ class WorkerAgent:
 
 ## 1. Profile (环境与画像)
 - **执行环境**: {platform.platform()}
+- **技能目录**: {os.getcwd()+"/skills/"}
 - **自我设定**: {self_profile}
 - **用户画像**: {user_profile}
 
@@ -245,11 +246,7 @@ class WorkerAgent:
    - **新任务**: 规划原子工具探索路径，明确成功后如何归类沉淀。
 3. **动作 (Action)**: 发起 `<function-call>...</function-call>`。
 4. **反馈 (Observe)**: 基于 Stdout 事实进行逻辑推进。
-5. **进化 (Distill)**: **【重要】** 成功后，创建对应的 `./skills/` 目录，保存手册与脚本。
-
-##目录要求
-技能全部都存入 ./skills 里面
-脚本全部存入 ./scripts 里面
+5. **进化 (Distill)**: **【重要】** 成功后，在**技能目录**下创建对应的技能目录，保存手册与脚本。
 
 ## 5. Output Format (规范示例)
 
@@ -257,7 +254,9 @@ class WorkerAgent:
 识别为“财务分析”领域任务。检索路径：`./skills/Finance/`。发现匹配技能 `tax_tool.md`。计划调用脚本执行。
 
 ### [Action]
-<function-call><工具名称></工具名称></function-call>
+<function-call>
+    <工具名称></工具名称>
+</function-call>
 
 ### [Response]
 (基于真实数据呈现结果)

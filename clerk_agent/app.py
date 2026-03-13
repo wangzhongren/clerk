@@ -1,29 +1,21 @@
 import os
 import sys
 import json
-import yaml
 import asyncio
 from pathlib import Path
-from flask import Flask, render_template, request, jsonify, Response, stream_with_context
+from flask import Flask, render_template
 from flask_cors import CORS
-import openai
-import uuid
-from flask import request, jsonify, Response, stream_with_context
-
-import os
-
-# 设置 HTTP 和 HTTPS 代理
-os.environ['http_proxy'] = 'http://127.0.0.1:7897'
-os.environ['https_proxy'] = 'http://127.0.0.1:7897'
 
 # 获取当前目录
-current_dir = Path(os.getcwd());
-print(current_dir);
+current_dir = Path(os.getcwd())
+print(current_dir)
 
 # 导入必要的模块
-from tagcall import function_call, get_system_prompt, parse_function_calls, global_registry
+from tagcall import function_call, get_system_prompt, global_registry
 from clerk_agent.agents import TaskAgent, SkillAgent, WorkerAgent
-from clerk_agent.tools import execute_shell_sync, read_file, write_file, execute_shell
+from clerk_agent.tools import execute_shell_sync, read_file, write_file, execute_shell, modify_file
+from clerk_agent.routes import register_routes
+from clerk_agent.config import load_config
 
 # 注册工具函数到 TagCall（只注册一次）
 def register_tools():
@@ -38,28 +30,51 @@ def register_tools():
         def write_file_tool(filepath: str, content: str):
             return write_file(filepath, content)
 
+    if 'modify_file' not in global_registry.get_all_functions():
+        @function_call(prompt="""【文件修改工具】支持替换、插入、删除、追加等操作。
+    1. **操作类型**：
+       - "replace": 替换文本 (需要 old_text, new_text 参数)
+       - "insert": 插入文本 (需要 position, content 参数，position  "start"/"end")可为行号或
+       - "delete": 删除文本 (需要 target 参数，可为行号范围或文本内容)
+       - "append": 追加文本 (需要 content 参数)
+    2. **使用场景**：修改配置文件、更新代码、调整文档内容等
+    3. **注意**：操作前建议先用 read_file 查看原内容""", name="modify_file")
+        def modify_file_tool(filepath: str, operation: str, old_text:str="",new_text:str="",position:str="",content:str="",target:str="",add_newline:bool=True):
+            # 构建关键字参数字典，只传递非空值
+            kwargs = {}
+            if old_text:
+                kwargs['old_text'] = old_text
+            if new_text:
+                kwargs['new_text'] = new_text
+            if position:
+                kwargs['position'] = position
+            if content:
+                kwargs['content'] = content
+            if target:
+                kwargs['target'] = target
+            # add_newline 参数需要特殊处理，因为它是 bool 类型
+            if 'add_newline' in locals():
+                kwargs['add_newline'] = add_newline
+            return modify_file(filepath, operation, **kwargs)
+
     if 'execute_shell' not in global_registry.get_all_functions():
-        @function_call(prompt="""执行跨平台 Shell 命令。
-1. **阻塞规避策略**：
-   - Linux/macOS: 使用 `&` 结尾或 `nohup ... &` 实现后台运行。
-   - Windows (CMD): 使用 `start /B [command]` 异步启动。
-   - Windows (PowerShell): 使用 `Start-Job -ScriptBlock { [command] }`。
-2. **严禁阻塞**：禁止执行无终止条件的命令（如 `ping` 不带次数限制、`top`、`tail -f`）。
-3. **路径兼容**：所有路径必须用双引号包裹，且注意 Windows 使用 `\` (需要转义为 `\\`)，Linux 使用 `/`。
-4. **静默执行**：长耗时任务请务必将输出重定向（如 `> output.log 2>&1`），严禁让主进程等待返回结果。""")
+        @function_call(prompt="""【异步后台启动器】用于长耗时任务。
+    1. **使用场景**：启动服务、安装大型包、跑模型、耗时超过 30 秒的脚本。
+    2. **行为预期**：调用后会立即返回"已启动"和日志路径。不要等待结果返回，应直接告知用户任务已后台运行。
+    3. **查看进度**：稍后可使用 `read_file` 读取返回的 `log_path` 来确认任务状态。
+    4. **注意**：Windows 下无需手动加 start /B，工具底层已处理。""")
         def execute_shell_tool(command: str):
             return execute_shell(command)
-    
+
+    # --- 同步工具注册 ---
     if 'execute_shell_sync' not in global_registry.get_all_functions():
-        @function_call(prompt="""同步执行短时 Shell 命令。
-    1. **使用场景**：仅用于能立即结束的操作（如 `ls`, `dir`, `git status`, `pip list`）。
-    2. **强制限制**：此工具执行时间上限为 30 秒，超时会被系统强行中断。
-    3. **严禁后台逻辑**：不要在此工具中使用 `&`、`start /B` 或 `Start-Job`，因为这些会导致获取不到预期的返回结果。
-    4. **获取反馈**：命令完成后会立即返回完整 stdout 输出。
-    5. **路径规范**：Windows 下路径需转义，所有路径建议用双引号包裹。""", name="execute_shell_sync")
+        @function_call(prompt="""【同步即时查询】用于短时间 (30s 内) 必须获取结果的任务。
+    1. **使用场景**：`ls/dir` 看文件、`git status`、`pip list`、读取配置、检查进程等。
+    2. **行为预期**：主进程会等待命令完成并直接返回 stdout 输出。
+    3. **禁忌**：严禁执行会阻塞或长耗时的命令，否则会导致机器人卡死并触发超时强制中断。""")
         def execute_shell_sync_tool(command: str):
             return execute_shell_sync(command)
-    
+        
     # 新增：更新自我设定
     if 'update_self_profile' not in global_registry.get_all_functions():
         @function_call(prompt="更新 Clerk 自身的设定和工作空间信息", name="update_self_profile")
@@ -71,6 +86,7 @@ def register_tools():
         @function_call(prompt="更新用户画像、偏好设置和个人信息", name="update_user_profile")
         def update_user_profile_tool(content: str):
             return update_user_profile(content)
+
     
 
 def update_self_profile(content: str) -> str:
@@ -87,15 +103,7 @@ def update_user_profile(content: str) -> str:
         f.write(content)
     return f"用户画像已更新并保存到 {user_file}"
 
-# 初始化代理
-task_agent = TaskAgent()
-skill_agent = SkillAgent()
-worker_agent = WorkerAgent(task_agent, skill_agent)
-
-# 注册工具
-register_tools()
-
-# 创建 Flask 应用
+# 创建 Flask
 app = Flask(__name__, 
     static_folder=str(current_dir / 'webui'),
     static_url_path='',  # 将静态路径映射到根目录
@@ -103,418 +111,11 @@ app = Flask(__name__,
 )
 CORS(app)
 
-def load_config():
-    """加载配置文件"""
-    config_path = current_dir / 'config.yaml'
-    if config_path.exists():
-        with open(config_path, 'r', encoding='utf-8') as f:
-            return yaml.safe_load(f)
-    return {}
+# 注册工具
+register_tools()
 
-def save_config(config_data):
-    """保存配置文件"""
-    config_path = current_dir / 'config.yaml'
-    with open(config_path, 'w', encoding='utf-8') as f:
-        yaml.dump(config_data, f, allow_unicode=True, default_flow_style=False)
-
-async def call_llm_stream(messages, config):
-    """流式调用大模型 API"""
-    try:
-        client = openai.AsyncOpenAI(
-            api_key=config.get('api_key'),
-            base_url=config.get('base_url', 'https://api.openai.com/v1')
-        )
-        
-        stream = await client.chat.completions.create(
-            model=config.get('model', 'gpt-4o-mini'),
-            messages=messages,
-            temperature=0.7,
-            # max_tokens=2000,
-            stream=True
-        )
-        return stream
-    except Exception as e:
-        raise Exception(f"LLM 调用失败：{str(e)}")
-
-@app.route('/')
-def index():
-    """主页面"""
-    return render_template('index.html')
-
-@app.route('/api/skills')
-def get_skills():
-    """获取所有技能列表"""
-    try:
-        skills = skill_agent.list_skills()
-        return jsonify({"skills": skills})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/api/skills/<skill_name>')
-def get_skill_content(skill_name):
-    """获取指定技能的详细内容"""
-    try:
-        content = skill_agent.read_skill(skill_name)
-        return jsonify({"content": content})
-    except FileNotFoundError:
-        return jsonify({"error": f"技能 {skill_name} 不存在"}), 404
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/api/skills', methods=['POST'])
-def save_skill():
-    """保存或更新技能"""
-    try:
-        data = request.json
-        skill_name = data.get('name')
-        content = data.get('content')
-        
-        if not skill_name or not content:
-            return jsonify({"error": "缺少技能名称或内容"}), 400
-        
-        skill_agent.save_skill(skill_name, content)
-        return jsonify({"message": f"技能 {skill_name} 保存成功"})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/api/skills/<skill_name>', methods=['DELETE'])
-def delete_skill(skill_name):
-    """删除技能"""
-    try:
-        skill_agent.delete_skill(skill_name)
-        return jsonify({"message": f"技能 {skill_name} 删除成功"})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/api/tasks')
-def get_tasks():
-    """获取任务索引列表"""
-    try:
-        tasks_file = current_dir / 'tasks.md'
-        if not tasks_file.exists():
-            return jsonify({"tasks": []})
-        
-        with open(tasks_file, 'r', encoding='utf-8') as f:
-            content = f.read()
-        
-        # 简单解析 Markdown 表格
-        tasks = []
-        lines = content.split('\n')
-        in_table = False
-        for line in lines:
-            if line.strip().startswith('| 任务 ID |'):
-                in_table = True
-                continue
-            if in_table and line.strip().startswith('| ') and not line.strip().startswith('|--------|'):
-                parts = [part.strip() for part in line.strip('| \n').split('|')]
-                if len(parts) >= 4:
-                    tasks.append({
-                        "id": parts[0],
-                        "created_at": parts[1],
-                        "description": parts[2],
-                        "status": parts[3]
-                    })
-        
-        return jsonify({"tasks": tasks})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/api/tasks/<task_id>')
-def get_task_detail(task_id):
-    """获取任务详细信息"""
-    try:
-        task_file = current_dir / 'tasks' / f"{task_id}.json"
-        if not task_file.exists():
-            return jsonify({"error": f"任务 {task_id} 不存在"}), 404
-        
-        with open(task_file, 'r', encoding='utf-8') as f:
-            task_data = json.load(f)
-        
-        return jsonify(task_data)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/api/tasks', methods=['POST'])
-def create_task():
-    """创建新任务"""
-    try:
-        data = request.json
-        description = data.get('description')
-        
-        if not description:
-            return jsonify({"error": "缺少任务描述"}), 400
-        
-        task_id = task_agent.create_task(description)
-        return jsonify({"task_id": task_id, "message": "任务创建成功"})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/api/config')
-def get_config():
-    """获取配置信息"""
-    try:
-        config = load_config()
-        # 不返回敏感的 API key
-        safe_config = config.copy()
-        safe_config.pop('api_key', None)
-        return jsonify(safe_config)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/api/config', methods=['POST'])
-def update_config():
-    """更新配置信息"""
-    try:
-        data = request.json
-        # 保留现有的 API key 如果没有提供新的
-        current_config = load_config()
-        if 'api_key' not in data and 'api_key' in current_config:
-            data['api_key'] = current_config['api_key']
-        
-        save_config(data)
-        return jsonify({"message": "配置更新成功"})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/api/execute', methods=['POST'])
-def execute_task():
-    """执行任务（ReAct 循环 + 流式传输）"""
-    try:
-        data = request.json
-        task_id = data.get('task_id')
-        history = data.get("history", [])
-        
-        if not task_id or not history:
-            return jsonify({"error": "缺少任务 ID 或对话历史"}), 400
-        
-        # 从 history 最后一条获取用户输入（不再依赖单独的 input 参数）
-        if not history or history[-1].get('role') != 'user':
-            return jsonify({"error": "对话历史最后一条必须是用户消息"}), 400
-        
-        user_input = history[-1].get('content')
-        
-        task_agent.log_to_task(task_id, {"type": "user_input", "content": user_input})
-        
-        config = load_config()
-        if not config.get('api_key'):
-            return jsonify({"error": "未配置 API Key，请先在设置中配置"}), 400
-        
-        system_prompt = worker_agent.get_system_prompt(get_system_prompt());
-        
-        print(system_prompt);
-        conversation_history = [
-            {"role": "system", "content": system_prompt},
-        ] + history
-        max_iterations = 100
-        iteration = 0
-        
-        # 内部 async 生成器逻辑
-        async def _async_generate():
-            nonlocal iteration, conversation_history
-            while iteration < max_iterations:
-                iteration += 1
-                yield f"data: {json.dumps({'type': 'iteration_start', 'iteration': iteration})}\n\n"
-                
-                stream = await call_llm_stream(conversation_history, config)
-                llm_response = ""
-                async for chunk in stream:
-                    if chunk.choices[0].delta.content is not None:
-                        content = chunk.choices[0].delta.content
-                        llm_response += content
-                        yield f"data: {json.dumps({'type': 'llm_token', 'content': content})}\n\n"
-                
-                task_agent.log_to_task(task_id, {
-                    "type": "llm_response", "content": llm_response, "iteration": iteration
-                })
-                
-                function_calls = parse_function_calls(llm_response)
-                
-                # 检查是否解析失败
-                if len(function_calls) == 1 and 'error' in function_calls[0]:
-                    error_msg = function_calls[0]['error']
-                    # 将错误信息作为观察结果反馈给 AI
-                    observation = f"函数调用解析失败: {error_msg}"
-                    yield f"data: {json.dumps({'type': 'function_error', 'function': 'parse_error', 'error': error_msg})}\n\n"
-                    
-                    # 添加到对话历史，让 AI 重新生成
-                    conversation_history.append({"role": "assistant", "content": llm_response})
-                    conversation_history.append({"role": "system", "content": f"Observation: {observation}"})
-                    yield f"data: {json.dumps({'type': 'observation', 'content': observation})}\n\n"
-                    continue
-                
-                if not function_calls:
-                    yield f"data: {json.dumps({'type': 'final_response', 'content': llm_response})}\n\n"
-                    task_agent.complete_task(task_id, "")
-                    break
-                
-                observation = ""
-                for call in function_calls:
-                    try:
-                        result = global_registry.execute_function(
-                            call['name'], *call['args'], **call['kwargs']
-                        )
-                        log_entry = {
-                            "type": "function_call", "function": call['name'],
-                            "args": call['args'], "kwargs": call['kwargs'],
-                            "result": result, "iteration": iteration
-                        }
-                        task_agent.log_to_task(task_id, log_entry)
-                        observation += f"执行 {call['name']} 的结果：{result}\n"
-                        yield f"data: {json.dumps({'type': 'function_result', 'function': call['name'], 'result': str(result)})}\n\n"
-                    except Exception as e:
-                        task_agent.log_to_task(task_id, {
-                            "type": "function_call_error", "function": call['name'],
-                            "error": str(e), "iteration": iteration
-                        })
-                        observation += f"执行 {call['name']} 时出错：{str(e)}\n"
-                        yield f"data: {json.dumps({'type': 'function_error', 'function': call['name'], 'error': str(e)})}\n\n"
-                
-                conversation_history.append({"role": "assistant", "content": llm_response})
-                conversation_history.append({"role": "system", "content": f"Observation: {observation.strip()}"})
-                yield f"data: {json.dumps({'type': 'observation', 'content': observation.strip()})}\n\n"
-            
-            if iteration >= max_iterations:
-                final_msg = "任务执行超时，已达到最大迭代次数。"
-                yield f"data: {json.dumps({'type': 'final_response', 'content': final_msg})}\n\n"
-                task_agent.complete_task(task_id, final_msg)
-            yield f"data: {json.dumps({'type': 'task_complete'})}\n\n"
-        
-        # 同步包装器：把 async generator 转为同步 generator
-        def _sync_generate():
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                async_gen = _async_generate()
-                while True:
-                    try:
-                        yield loop.run_until_complete(async_gen.__anext__())
-                    except StopAsyncIteration:
-                        break
-            finally:
-                loop.close()
-        
-        # 返回时用 stream_with_context 包装同步 generator
-        return Response(
-            stream_with_context(_sync_generate()),
-            mimetype='text/event-stream'
-        )
-        
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/api/save_script_as_skill', methods=['POST'])
-def save_script_as_skill():
-    """将生成的脚本保存为技能"""
-    try:
-        data = request.json
-        script_content = data.get('script_content')
-        skill_name = data.get('skill_name')
-        skill_description = data.get('skill_description', '')
-        
-        if not script_content or not skill_name:
-            return jsonify({"error": "缺少脚本内容或技能名称"}), 400
-        
-        # 1. 保存脚本到 scripts 目录
-        scripts_dir = current_dir / "scripts"
-        scripts_dir.mkdir(exist_ok=True)
-        script_file = scripts_dir / f"{skill_name}.py"
-        
-        with open(script_file, 'w', encoding='utf-8') as f:
-            f.write(script_content)
-        
-        # 2. 创建技能描述 Markdown
-        skill_md_content = f"""# {skill_name}
-
-{skill_description}
-
-## 使用方法
-```python
-# 调用此技能来执行相关操作
-```
-
-## 脚本位置
-`./scripts/{skill_name}.py`
-"""
-        
-        # 3. 保存技能到 skills 目录
-        skill_agent.save_skill(skill_name, skill_md_content)
-        
-        return jsonify({"message": f"脚本已保存为技能 '{skill_name}'"})
-        
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/api/summarize', methods=['POST'])
-async def summarize_conversation():
-    """总结对话历史，每 50 轮调用一次"""
-    try:
-        data = request.json
-        task_id = data.get('task_id')
-        conversation_history = data.get('conversation_history', [])
-        
-        if not task_id:
-            return jsonify({"error": "缺少任务 ID"}), 400
-        
-        # 构建总结提示
-        history_text = "\n".join([
-            f"{'用户' if msg['sender'] == 'user' else '助手'}: {msg['message']}"
-            for msg in conversation_history
-        ])
-        
-        summary_prompt = f"""你是一个办公自动化助手，需要对以下对话历史进行总结。
-请按照以下格式输出 Markdown：
-
-## 当前任务状态
-[简要描述当前任务的进展和状态]
-
-## 下一步计划
-[建议下一步应该做什么]
-
-对话历史：
-{history_text}
-"""
-        
-        # 加载配置
-        config = load_config()
-        if not config.get('api_key'):
-            return jsonify({"error": "未配置 API Key，请先在设置中配置"}), 400
-        
-        # 调用 LLM 进行总结
-        summary = await call_llm("你是一个专业的办公自动化助手，请根据要求总结对话。", summary_prompt, config)
-        
-        # 记录总结到任务日志
-        task_agent.log_to_task(task_id, {
-            "type": "summary",
-            "content": summary
-        })
-        
-        return jsonify({"summary": summary})
-        
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-async def call_llm(system_prompt, user_message, config):
-    """调用大模型 API"""
-    try:
-        client = openai.AsyncOpenAI(
-            api_key=config.get('api_key'),
-            base_url=config.get('base_url', 'https://api.openai.com/v1')
-        )
-        
-        response = await client.chat.completions.create(
-            model=config.get('model', 'gpt-4o-mini'),
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_message}
-            ],
-            temperature=0.7,
-            # max_tokens=2000
-        )
-        
-        return response.choices[0].message.content
-    except Exception as e:
-        raise Exception(f"LLM 调用失败：{str(e)}")
+# 注册路由
+register_routes(app)
 
 def main():
     """启动 Flask WebUI"""
@@ -525,6 +126,7 @@ def main():
         print(f"   - {func_name}")
     
     print("\n📁 技能库状态:")
+    skill_agent = SkillAgent()
     skills = skill_agent.list_skills()
     if skills:
         for skill in skills:
@@ -533,11 +135,11 @@ def main():
         print("   (暂无技能)")
     
     print("\n🌐 WebUI 服务启动:")
-    print("   访问地址：http://localhost:5000")
+    print("   访问地址：http://localhost:5002")
     print("   按 Ctrl+C 停止服务")
     
     # 启动 Flask 应用
-    app.run(host='0.0.0.0', port=5000, debug=False)
+    app.run(host='0.0.0.0', port=5002, debug=False)
 
 if __name__ == "__main__":
     main()

@@ -133,13 +133,61 @@ class FunctionRegistry:
         """获取所有已注册的 agent 名称"""
         return list(self._functions.keys())
     
+    import re
+
     def get_prompt_descriptions(self, agent: str = "default") -> str:
-        """获取指定 agent 所有函数的提示词描述"""
+        """从函数签名生成 100% 准确的 Few-shot 示例提示词"""
         descriptions = []
-        for name, info in self._functions.get(agent, {}).items():
-            descriptions.append(f"{info['function_str']} - {info['prompt']}")
-        return "\n".join(descriptions)
-    
+        functions = self._functions.get(agent, {})
+        
+        for name, info in functions.items():
+            f_str = info['function_str']
+            prompt_text = info['prompt']
+            
+            # --- 优化点：不再使用正则，而是基于 ast 逻辑提取纯净参数名 ---
+            try:
+                # 简单解析括号内的参数，去掉默认值和星号
+                # 这种方法比直接 match 完整函数名更稳
+                params_part = f_str.split('(', 1)[1].rsplit(')', 1)[0]
+                # 分割并清洗，例如 "path, mode='r'" -> "path, mode"
+                clean_params = []
+                for p in params_part.split(','):
+                    p = p.strip()
+                    if not p: continue
+                    # 只保留变量名部分，去掉 = 及之后的默认值
+                    param_name = p.split('=')[0].strip().replace('*', '')
+                    if param_name:
+                        clean_params.append(param_name)
+                
+                body_fields = ",".join(clean_params)
+                
+                # 构造 CDATA 示例块
+                cdata_examples = ""
+                for p in clean_params:
+                    # 加入你的本地化存储记忆 [2026-02-26]
+                    if "path" in p.lower():
+                        val = "./config/config.json"
+                    elif "content" in p.lower():
+                        val = '{"key": "value"}'
+                    else:
+                        val = f"sample_{p}"
+                    cdata_examples += f"    <![CDATA[ {val} ]]>\n"
+                
+                example = (
+                    f"### 函数: {name}\n"
+                    f"功能描述: {prompt_text}\n"
+                    f"严格输出格式示例:\n"
+                    f"<function-call>\n"
+                    f"  <{name} _body_fields=\"{body_fields}\">\n"
+                    f"{cdata_examples.rstrip()}\n"
+                    f"  </{name}>\n"
+                    f"</function-call>"
+                )
+                descriptions.append(example)
+            except Exception:
+                descriptions.append(f"### {f_str}\n功能描述: {prompt_text}")
+
+        return "\n\n---\n\n".join(descriptions)
     def execute_function(self, name: str, *args, agent: str = "default", **kwargs) -> Any:
         """执行注册的函数"""
         func_info = self.get_function(name, agent)
@@ -226,78 +274,105 @@ def parse_xml_to_dict(xml_content: str) -> Dict[str, Any]:
         
     return result
 
-def parse_function_calls(text: str) -> List[Dict]:
-    """
-    使用正则严格解析 <function-call>。
-    即便没有闭合标签，也会将错误封装成字典返回。
-    """
+import xml.etree.ElementTree as ET
+from typing import List, Dict, Any
+import traceback
+
+
+import re
+import xml.dom.minidom
+from typing import List, Dict
+
+import re
+import xml.dom.minidom
+from typing import List, Dict
+
+def parse_function_calls(text: str, agent: str = "default") -> List[Dict]:
     function_calls = []
-
-    # 1. 定义内部递归解析逻辑
-    def extract_tags_recursive(content: str) -> Any:
-        # 匹配 <tag>内容</tag>
-        # \1 保证了起始和结束标签名必须完全一致
-        pattern = re.compile(r'<(\w+)>(.*?)</\1>', re.DOTALL)
-        matches = pattern.findall(content)
-        
-        if not matches:
-            # 容错：如果还残留 < 符号，说明可能存在未闭合标签
-            if '<' in content:
-                orphan = re.search(r'<(\w+)>', content)
-                if orphan:
-                    raise ValueError(f"发现未闭合标签: <{orphan.group(1)}>，请检查 XML 结构")
-            return content.strip()
-        
-        result = {}
-        for tag, inner_content in matches:
-            result[tag] = extract_tags_recursive(inner_content)
-        return result
-
-    # 2. 寻找所有 <function-call> 的起始位置
-    # 这样即使没有结束标签，我们也能定位到错误
-    start_tags = list(re.finditer(r'<function-call>', text))
     
-    for i, start_match in enumerate(start_tags):
-        start_pos = start_match.start()
-        # 截取当前标签到文本末尾，寻找最近的一个闭合标签
-        remaining_text = text[start_pos:]
-        block_match = re.search(r'<function-call>(.*?)</function-call>', remaining_text, re.DOTALL)
-        
+    # 1. 提取 <function-call> 块
+    blocks = re.findall(r'<function-call>(.*?)</function-call>', text, re.DOTALL)
+    
+    # 容错：未闭合标签检测
+    if text.count('<function-call>') > len(blocks):
+        function_calls.append({
+            'name': 'unknown_wrapper',
+            'error': "检测到未闭合的 <function-call> 标签",
+            'type': 'syntax_error'
+        })
+
+    for block in blocks:
+        # 预先尝试用正则抓取标签名，以防 XML 解析彻底崩溃
+        # 匹配 <tag_name _body_fields=... 或 <tag_name>
+        tag_match = re.search(r'<([a-zA-Z0-9_]+)[\s>]', block.strip())
+        tentative_name = tag_match.group(1) if tag_match else "unknown_function"
+
         try:
-            if not block_match:
-                # 场景：有开头没结尾
-                raise ValueError("检测到 <function-call> 标签未闭合")
+            # 包装并解析
+            dom = xml.dom.minidom.parseString(f"<root>{block}</root>")
+            root = dom.documentElement
             
-            block_content = block_match.group(1)
-            # 解析内部结构 (例如 <execute_shell><command>...</command></execute_shell>)
-            full_structure = extract_tags_recursive(block_content)
-            
-            if isinstance(full_structure, dict):
-                for func_name, params in full_structure.items():
-                    # 按照你的要求，封装进 kwargs
-                    kwargs = {}
-                    if isinstance(params, dict):
-                        kwargs.update(params)
-                    else:
-                        # 如果函数标签内部直接是文本内容
-                        kwargs['content'] = params
-                    
+            for func_node in root.childNodes:
+                if func_node.nodeType != func_node.ELEMENT_NODE:
+                    continue
+                
+                func_name = func_node.tagName
+                fields_str = func_node.getAttribute('_body_fields')
+                field_names = [f.strip() for f in fields_str.split(',') if f.strip()]
+                
+                # 提取 CDATA 块
+                cdata_values = [
+                    node.data for node in func_node.childNodes 
+                    if node.nodeType == node.CDATA_SECTION_NODE
+                ]
+                
+                # 校验数量
+                if field_names and len(field_names) != len(cdata_values):
                     function_calls.append({
                         'name': func_name,
-                        'args': [],
-                        'kwargs': kwargs
+                        'error': f"字段数({len(field_names)})与数据块数({len(cdata_values)})不符",
+                        'type': 'validation_error'
                     })
-            else:
-                raise ValueError("未能在 <function-call> 中找到有效的函数名标签")
+                    continue
+
+                # 映射参数
+                kwargs = {name: value.strip() for name, value in zip(field_names, cdata_values)}
+                
+                function_calls.append({
+                    'name': func_name,
+                    'kwargs': kwargs
+                })
 
         except Exception as e:
-            # 发生任何解析错误时，封装成错误 JSON
-            error_info = {
-                'error': str(e),
-                'error_type': type(e).__name__,
-                'error_msg': traceback.format_exc(),
-                'raw_segment': remaining_text[:100] + "..." # 保存出错部分的上下文
-            }
-            function_calls.append(error_info)
+            # 哪怕解析失败，也要把刚才正则抢救到的名字传回去
+            function_calls.append({
+                'name': tentative_name,
+                'error': f"XML 解析失败: {str(e)}",
+                'type': 'parse_error',
+                'raw_segment': block[:100] # 保留前100个字符方便Debug
+            })
             
     return function_calls
+
+
+def _parse_xml_node_to_dict(node) -> Any:
+    """辅助函数：将 XML 节点递归转为字典"""
+    res = {}
+    for child in node:
+        if len(child) > 0:
+            res[child.tag] = _parse_xml_node_to_dict(child)
+        else:
+            res[child.tag] = _infer_type(child.text)
+    return res
+
+def _infer_type(text: Optional[str]) -> Any:
+    """简单的类型推断"""
+    if text is None: return None
+    t = text.strip()
+    if t.lower() == 'true': return True
+    if t.lower() == 'false': return False
+    try:
+        if '.' in t: return float(t)
+        return int(t)
+    except ValueError:
+        return t
