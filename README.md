@@ -64,7 +64,7 @@ dangerous_commands:
 ### 启动服务
 
 ```bash
-python clerk_agent/app.py
+python -m clerk_agent.app
 ```
 
 服务启动后，访问 `http://localhost:5000` 即可使用 Web 界面。
