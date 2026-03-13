@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Clerk Agent | 融资演示版</title>
+    <title>Clerk Agent</title>
     <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700&display=swap" rel="stylesheet">
     <style>
         :root { --black: #000; --white: #fff; --border: #e0e0e0; --gray-light: #f9f9f9; }
@@ -17,6 +17,16 @@
         .nav-item { width: 100%; padding: 18px 30px; border: none; background: transparent; color: #666; text-align: left; cursor: pointer; font-size: 14px; transition: 0.3s; }
         .nav-item.active { color: var(--white); background: #111; border-right: 4px solid var(--white); }
         .nav-item:hover { color: var(--white); }
+        
+        /* Token 用量显示 */
+        .token-usage { margin-top: auto; padding: 20px 30px; border-top: 1px solid #333; }
+        .token-usage h4 { margin: 0 0 15px 0; font-size: 12px; font-weight: 700; color: #888; letter-spacing: 1px; }
+        .token-stat { display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 12px; }
+        .token-stat-label { color: #888; }
+        .token-stat-value { color: var(--white); font-weight: 700; }
+        .token-stat-value.highlight { color: #4CAF50; }
+        .token-reset-btn { width: 100%; margin-top: 15px; padding: 8px; background: transparent; border: 1px solid #444; color: #888; font-size: 11px; cursor: pointer; transition: 0.2s; }
+        .token-reset-btn:hover { border-color: #666; color: var(--white); }
 
         /* --- 主容器 --- */
         .main {
@@ -91,10 +101,10 @@
         .save-script-btn:hover { background: var(--black); color: var(--white); }
 
         /* --- 输入区域 --- */
-        .input-area { position: fixed; bottom: 40px; left: 280px; right: 40px; display: flex; justify-content: center; background: transparent; }
-        .input-group { width: 100%; max-width: 900px; display: flex; border: 2px solid var(--black); background: #fff; box-shadow: 10px 10px 0px rgba(0,0,0,0.05); }
-        .input-group input { flex: 1; border: none; padding: 18px 24px; font-size: 15px; outline: none; }
-        .input-group button { background: var(--black); color: var(--white); border: none; padding: 0 35px; font-weight: 700; cursor: pointer; transition: 0.2s; }
+        .input-area { position: fixed; bottom: 30px; left: 280px; right: 40px; display: flex; justify-content: center; background: transparent; }
+        .input-group { width: 100%; max-width: 800px; display: flex; border: 2px solid var(--black); background: #fff; box-shadow: 6px 6px 0px rgba(0,0,0,0.05); border-radius: 8px; }
+        .input-group textarea { flex: 1; border: none; padding: 12px 18px; font-size: 14px; outline: none; font-family: inherit; resize: none; min-height: 20px; max-height: 120px; overflow-y: auto; line-height: 1.4; }
+        .input-group button { background: var(--black); color: var(--white); border: none; padding: 0 28px; font-weight: 700; cursor: pointer; transition: 0.2s; font-size: 14px; border-radius: 0 6px 6px 0; }
         .input-group button:hover { opacity: 0.8; }
         .input-group button:disabled { background: #ccc; cursor: not-allowed; opacity: 0.6; }
 
@@ -104,11 +114,37 @@
         .btn-outline { border: 1px solid var(--black); background: transparent; padding: 8px 16px; font-size: 12px; font-weight: 700; cursor: pointer; }
         .btn-black { background: var(--black); color: var(--white); border: none; padding: 12px 30px; font-weight: 700; cursor: pointer; }
         
-        /* --- Badge 状态标签样式 (新增) --- */
+        /* --- Badge 状态标签样式 --- */
         .badge { display: inline-block; padding: 4px 10px; border-radius: 12px; font-size: 11px; font-weight: 700; }
         .badge-success { background: #d4edda; color: #155724; }
         .badge-danger { background: #f8d7da; color: #721c24; }
         .badge-warning { background: #fff3cd; color: #856404; }
+
+        /* --- 任务历史列表样式 --- */
+        .task-history-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 15px 20px;
+            border-bottom: 1px solid var(--border);
+            cursor: pointer;
+            transition: 0.2s;
+        }
+        .task-history-item:hover { background: var(--gray-light); }
+        .task-history-item:last-child { border-bottom: none; }
+        .task-history-info { flex: 1; }
+        .task-history-title { font-size: 14px; font-weight: 700; margin-bottom: 5px; }
+        .task-history-meta { font-size: 11px; color: #888; }
+        .task-history-status { margin-left: 15px; }
+
+        /* --- 配置表单样式 --- */
+        .config-section { margin-bottom: 30px; }
+        .config-section h3 { margin: 0 0 20px 0; font-size: 18px; font-weight: 700; }
+        .form-group { margin-bottom: 25px; }
+        .form-group label { display: block; font-size: 11px; font-weight: 700; margin-bottom: 10px; color: #666; }
+        .form-group input { width: 100%; border: none; border-bottom: 1px solid #000; padding: 10px 0; outline: none; font-size: 16px; }
+        .form-group input[type="checkbox"] { width: auto; margin-right: 10px; }
+        .form-group.checkbox-label { display: flex; align-items: center; font-size: 14px; color: #000; }
 
         /* --- 弹窗 --- */
         .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(255,255,255,0.98); z-index: 9999; align-items: center; justify-content: center; }
@@ -122,9 +158,32 @@
         <div class="logo">CLERK AGENT</div>
         <nav>
             <button class="nav-item active" data-tab="workbench">智能工作台</button>
+            <button class="nav-item" data-tab="tasks">任务列表</button>
             <button class="nav-item" data-tab="skills">能力矩阵</button>
             <button class="nav-item" data-tab="settings">核心配置</button>
         </nav>
+        
+        <!-- Token 用量显示 -->
+        <div class="token-usage">
+            <h4>TOKEN 用量</h4>
+            <div class="token-stat">
+                <span class="token-stat-label">输入</span>
+                <span class="token-stat-value" id="token-prompt">0</span>
+            </div>
+            <div class="token-stat">
+                <span class="token-stat-label">输出</span>
+                <span class="token-stat-value" id="token-completion">0</span>
+            </div>
+            <div class="token-stat">
+                <span class="token-stat-label">总计</span>
+                <span class="token-stat-value highlight" id="token-total">0</span>
+            </div>
+            <div class="token-stat">
+                <span class="token-stat-label">会话数</span>
+                <span class="token-stat-value" id="token-sessions">0</span>
+            </div>
+            <button class="token-reset-btn" onclick="resetTokenUsage()">重置统计</button>
+        </div>
     </aside>
 
     <main class="main">
@@ -136,37 +195,80 @@
             
             <div class="input-area">
                 <div class="input-group">
-                    <input type="text" id="user-input" placeholder="请输入指令来调用 Agent 能力...">
+                    <textarea id="user-input" placeholder="请输入指令来调用 Agent 能力... (支持多行输入)" rows="3"></textarea>
                     <button id="submit-task">执行</button>
                 </div>
             </div>
         </div>
 
+        <div id="tasks" class="tab-content">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:30px;">
+                <h3 style="margin:0; font-size:24px; font-weight:700;">任务历史</h3>
+                <button class="btn-outline" onclick="loadTaskHistoryToSettings()">刷新列表</button>
+            </div>
+            <div id="task-list-container" style="border:1px solid var(--border);"></div>
+        </div>
+
         <div id="skills" class="tab-content">
             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:30px;">
-                <h3 style="margin:0; font-size:24px; font-weight:700;">原子能力库</h3>
+                <h3 style="margin:0; font-size:24px; font-weight:700;">技能预览</h3>
                 <button class="btn-black" onclick="openSkillModal()">+ 注册新能力</button>
             </div>
             <div id="skills-list"></div>
         </div>
 
         <div id="settings" class="tab-content">
-            <div style="max-width:500px">
-                <form id="config-form">
-                    <div style="margin-bottom:25px">
-                        <label style="display:block; font-size:11px; font-weight:700; margin-bottom:10px; color:#666;">API_KEY</label>
-                        <input type="password" id="api-key" style="width:100%; border:none; border-bottom:1px solid #000; padding:10px 0; outline:none; font-size:16px;">
-                    </div>
-                    <div style="margin-bottom:25px">
-                        <label style="display:block; font-size:11px; font-weight:700; margin-bottom:10px; color:#666;">BASE_URL</label>
-                        <input type="text" id="base-url" style="width:100%; border:none; border-bottom:1px solid #000; padding:10px 0; outline:none; font-size:16px;">
-                    </div>
-                    <div style="margin-bottom:40px">
-                        <label style="display:block; font-size:11px; font-weight:700; margin-bottom:10px; color:#666;">MODEL IDENTIFIER</label>
-                        <input type="text" id="model" style="width:100%; border:none; border-bottom:1px solid #000; padding:10px 0; outline:none; font-size:16px;">
-                    </div>
-                    <button type="submit" class="btn-black" style="width:100%">保存系统配置</button>
-                </form>
+            <div style="max-width:800px">
+                <!-- 任务历史 -->
+                <div class="config-section">
+                    <h3>任务历史</h3>
+                    <div id="task-history-list" style="border:1px solid var(--border); margin-top:15px;"></div>
+                </div>
+
+                <!-- AI 配置 -->
+                <div class="config-section">
+                    <h3>AI 模型配置</h3>
+                    <form id="ai-config-form">
+                        <div class="form-group">
+                            <label>API_KEY</label>
+                            <input type="password" id="api-key" placeholder="请输入 API Key">
+                        </div>
+                        <div class="form-group">
+                            <label>BASE_URL</label>
+                            <input type="text" id="base-url" placeholder="https://api.openai.com/v1">
+                        </div>
+                        <div class="form-group">
+                            <label>MODEL IDENTIFIER</label>
+                            <input type="text" id="model" placeholder="gpt-4o-mini">
+                        </div>
+                        <button type="submit" class="btn-black" style="width:100%">保存 AI 配置</button>
+                    </form>
+                </div>
+
+                <!-- 飞书配置 -->
+                <!-- <div class="config-section">
+                    <h3>飞书集成 (Socket Mode)</h3>
+                    <form id="feishu-config-form">
+                        <div class="form-group">
+                            <label>App ID</label>
+                            <input type="text" id="feishu-app-id" placeholder="cli_xxx">
+                        </div>
+                        <div class="form-group">
+                            <label>App Secret</label>
+                            <input type="password" id="feishu-app-secret" placeholder="请输入 App Secret">
+                        </div>
+                        <div class="form-group">
+                            <label>Encrypt Key (可选)</label>
+                            <input type="password" id="feishu-encrypt-key" placeholder="用于消息加密">
+                        </div>
+                        <div class="form-group checkbox-label">
+                            <input type="checkbox" id="feishu-socket-enabled">
+                            <label for="feishu-socket-enabled">启用 Socket Mode</label>
+                        </div>
+                        <button type="submit" class="btn-black" style="width:100%">保存飞书配置</button>
+                        <div id="feishu-status" style="margin-top: 10px; font-size: 12px; color: #666;"></div>
+                    </form>
+                </div> -->
             </div>
         </div>
     </main>
@@ -188,7 +290,33 @@
         <div class="modal-content">
             <h3 id="task-detail-title" style="margin-top:0">任务详情</h3>
             <div id="task-detail-content" style="max-height:400px; overflow-y:auto; font-size:13px; line-height:1.5;"></div>
-            <button class="btn-black" onclick="closeTaskDetailModal()" style="margin-top:30px">关闭详情</button>
+            <div style="display:flex; justify-content:flex-end; gap:15px; margin-top:30px;">
+                <button class="btn-outline" onclick="openSummarizeModal()" style="color:#1976d2; border-color:#1976d2;">📝 总结成技能</button>
+                <button class="btn-black" onclick="closeTaskDetailModal()">关闭详情</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal" id="summarizeModal">
+        <div class="modal-content">
+            <h3 style="margin:0; font-weight:700;">总结为技能</h3>
+            <p style="color:#666; font-size:13px; margin:15px 0;">将当前任务的成功执行路径总结为可复用的技能</p>
+            <div class="form-group">
+                <label>技能名称</label>
+                <input type="text" id="summarize-skill-name" placeholder="例如：文件批量重命名">
+            </div>
+            <div class="form-group">
+                <label>技能描述</label>
+                <input type="text" id="summarize-skill-desc" placeholder="简要描述技能功能">
+            </div>
+            <div class="form-group">
+                <label>技能内容预览</label>
+                <textarea id="summarize-skill-content" rows="10" placeholder="自动生成的技能内容..." readonly></textarea>
+            </div>
+            <div style="display:flex; justify-content:flex-end; gap:15px;">
+                <button class="btn-black" onclick="confirmSummarizeSkill()">确认保存</button>
+                <button class="btn-outline" onclick="closeSummarizeModal()">取消</button>
+            </div>
         </div>
     </div>
 

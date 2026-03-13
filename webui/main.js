@@ -14,9 +14,18 @@ document.addEventListener('DOMContentLoaded', () => {
     loadSkills();
     loadTasks();
     loadConfig();
+    loadTaskHistoryToSettings(); // 加载任务历史到配置页面
     
     // 初始化页面时显示保存的对话历史
     renderSavedConversation();
+    
+    // 加载 Token 用量
+    loadTokenUsage();
+    
+    // 确保初始状态干净
+    currentAssistantMessageContainer = null;
+    currentStreamingText = '';
+    hasFinalResponse = false;
 });
 
 function bindNavEvents() {
@@ -29,18 +38,48 @@ function bindNavEvents() {
             const tabId = this.getAttribute('data-tab');
             document.getElementById(tabId).classList.add('active');
             document.getElementById('page-title').textContent = this.textContent.trim();
+            
+            // 切换到不同页面时刷新对应数据
+            if (tabId === 'settings') {
+                loadTaskHistoryToSettings();
+            } else if (tabId === 'tasks') {
+                loadTaskList();
+            }
         });
     });
-    document.getElementById('submit-task').addEventListener('click', submitTask);
-    document.getElementById('user-input').addEventListener('keypress', e => { if (e.key === 'Enter') submitTask(); });
-    document.getElementById('config-form').addEventListener('submit', saveConfig);
+    
+    const submitTaskBtn = document.getElementById('submit-task');
+    const userInput = document.getElementById('user-input');
+    const aiConfigForm = document.getElementById('ai-config-form');
+    const feishuConfigForm = document.getElementById('feishu-config-form');
+    
+    if (submitTaskBtn) {
+        submitTaskBtn.addEventListener('click', submitTask);
+    }
+    if (userInput) {
+        userInput.addEventListener('keypress', e => { if (e.key === 'Enter') submitTask(); });
+    }
+    if (aiConfigForm) {
+        aiConfigForm.addEventListener('submit', saveAIConfig);
+    }
+    if (feishuConfigForm) {
+        feishuConfigForm.addEventListener('submit', saveFeishuConfig);
+    }
 }
 
-// 从 localStorage 加载对话历史
+// 从 localStorage 加载对话历史（带数据校验）
 function loadConversationHistory() {
     try {
         const saved = localStorage.getItem('clerk_conversation_history');
-        return saved ? JSON.parse(saved) : [];
+        if (!saved) return [];
+        const parsed = JSON.parse(saved);
+        if (!Array.isArray(parsed)) return [];
+        // 验证每条消息格式
+        return parsed.filter(msg => 
+            typeof msg === 'object' && 
+            (msg.sender === 'user' || msg.sender === 'assistant') && 
+            typeof msg.message === 'string'
+        );
     } catch (e) {
         console.warn('Failed to load conversation history from localStorage:', e);
         return [];
@@ -60,6 +99,8 @@ function saveConversationHistory() {
 // 渲染保存的对话历史
 function renderSavedConversation() {
     const container = document.getElementById('conversation-history');
+    if (!container) return;
+    
     container.innerHTML = '';
     
     conversationHistory.forEach(msg => {
@@ -67,7 +108,9 @@ function renderSavedConversation() {
         const div = document.createElement('div');
         div.className = `message-container ${msg.sender}`;
         const avatar = msg.sender === 'user' ? '我' : 'C';
-        div.innerHTML = `<div class="message-avatar">${avatar}</div><div class="message-content">${marked.parse(msg.message)}</div>`;
+        // 安全处理 message 内容
+        const safeMessage = msg.message || '';
+        div.innerHTML = `<div class="message-avatar">${avatar}</div><div class="message-content">${marked.parse(safeMessage)}</div>`;
         container.appendChild(div);
     });
     
@@ -86,8 +129,10 @@ async function submitTask() {
     addMessageToHistory('user', text);
     inputEl.value = '';
     isProcessing = true;
-    submitBtn.disabled = true;
-    submitBtn.textContent = '执行中...';
+    if (submitBtn) {
+        submitBtn.disabled = true;
+        submitBtn.textContent = '执行中...';
+    }
 
     // 重置状态
     currentAssistantMessageContainer = null;
@@ -164,15 +209,15 @@ async function submitTask() {
                         currentStreamingText += data.content;
                         renderCurrentStreamingText();
                     } else if (data.type === 'function_result') {
-                        // 函数调用结果，创建独立块
+                        // 函数调用结果，创建独立块（不保存到历史）
                         flushCurrentStreamingText(); // 先刷新累积的 LLM 文本
                         addAssistantMessagePart('function', `执行 ${data.function} 的结果: ${data.result}`);
                     } else if (data.type === 'function_error') {
-                        // 函数调用错误，创建独立块
+                        // 函数调用错误，创建独立块（不保存到历史）
                         flushCurrentStreamingText(); // 先刷新累积的 LLM 文本
                         addAssistantMessagePart('error', `执行 ${data.function} 时出错: ${data.error}`);
                     } else if (data.type === 'observation') {
-                        // 观察结果，创建独立块
+                        // 观察结果，创建独立块（不保存到历史）
                         flushCurrentStreamingText(); // 先刷新累积的 LLM 文本
                         addAssistantMessagePart('observation', `Observation: ${data.content}`);
                     } else if (data.type === 'final_response') {
@@ -180,8 +225,12 @@ async function submitTask() {
                         flushCurrentStreamingText();
                         addAssistantMessagePart('final', data.content);
                         hasFinalResponse = true;
+                        // 只有最终响应才保存到历史记录
+                        conversationHistory.push({ sender: 'assistant', message: data.content });
+                        checkAndCleanupHistory();
+                        saveConversationHistory();
                     } else if (data.type === 'iteration_start') {
-                        // 迭代开始，可以显示迭代信息
+                        // 迭代开始，可以显示迭代信息（不保存到历史）
                         flushCurrentStreamingText(); // 先刷新累积的 LLM 文本
                         addAssistantMessagePart('info', `--- 迭代 ${data.iteration} ---`);
                     }
@@ -189,27 +238,33 @@ async function submitTask() {
             }
         }
         
-    } catch (e) {
-        addMessageToHistory('assistant', '❌ 执行错误：' + e.message);
-    } finally {
-        // 确保最后的流式文本被保存
+        // 如果没有收到 final_response，将累积的文本作为最终响应
         if (!hasFinalResponse && currentStreamingText) {
             flushCurrentStreamingText();
-            // 如果没有收到 final_response，将累积的文本作为最终响应
-            conversationHistory.push({ sender: 'assistant', message: currentStreamingText });
+            const finalContent = currentStreamingText;
+            addAssistantMessagePart('final', finalContent);
+            // 保存到历史记录
+            conversationHistory.push({ sender: 'assistant', message: finalContent });
             checkAndCleanupHistory();
             saveConversationHistory();
         }
+        
+    } catch (e) {
+        addMessageToHistory('assistant', '❌ 执行错误：' + e.message);
+    } finally {
         resetInputState();
         loadTasks();
+        loadTokenUsage(); // 任务完成后自动刷新 Token 用量
     }
 }
 
 function resetInputState() {
     isProcessing = false;
     const submitBtn = document.getElementById('submit-task');
-    submitBtn.disabled = false;
-    submitBtn.textContent = '执行';
+    if (submitBtn) {
+        submitBtn.disabled = false;
+        submitBtn.textContent = '执行';
+    }
     currentAssistantMessageContainer = null;
     currentStreamingText = '';
     hasFinalResponse = false;
@@ -220,6 +275,7 @@ function renderCurrentStreamingText() {
     if (!currentAssistantMessageContainer) {
         // 创建助手消息容器
         const container = document.getElementById('conversation-history');
+        if (!container) return;
         currentAssistantMessageContainer = document.createElement('div');
         currentAssistantMessageContainer.className = 'message-container assistant';
         currentAssistantMessageContainer.innerHTML = `<div class="message-avatar">C</div><div class="message-content"></div>`;
@@ -254,6 +310,7 @@ function flushCurrentStreamingText() {
     if (!currentAssistantMessageContainer) {
         // 如果还没有容器，先创建
         const container = document.getElementById('conversation-history');
+        if (!container) return;
         currentAssistantMessageContainer = document.createElement('div');
         currentAssistantMessageContainer.className = 'message-container assistant';
         currentAssistantMessageContainer.innerHTML = `<div class="message-avatar">C</div><div class="message-content"></div>`;
@@ -288,6 +345,7 @@ function flushCurrentStreamingText() {
 // 添加助手消息的不同部分
 function addAssistantMessagePart(type, content) {
     const container = document.getElementById('conversation-history');
+    if (!container) return;
     
     // 如果还没有助手消息容器，创建一个新的
     if (!currentAssistantMessageContainer) {
@@ -310,11 +368,6 @@ function addAssistantMessagePart(type, content) {
         partDiv.style.lineHeight = '1.6';
         partDiv.style.marginBottom = '12px';
         partDiv.innerHTML = marked.parse(content);
-        
-        // 将最终响应添加到历史记录
-        conversationHistory.push({ sender: 'assistant', message: content });
-        checkAndCleanupHistory();
-        saveConversationHistory();
     } else {
         // 其他类型使用小字体
         partDiv.style.fontSize = '12px';
@@ -370,6 +423,7 @@ function scrollToBottom() {
 
 function addMessageToHistory(sender, message, isStreaming = false) {
     const container = document.getElementById('conversation-history');
+    if (!container) return;
     
     if (sender === 'user') {
         const div = document.createElement('div');
@@ -392,7 +446,7 @@ function addMessageToHistory(sender, message, isStreaming = false) {
         div.innerHTML = `<div class="message-avatar">C</div><div class="message-content">${marked.parse(message)}</div>`;
         container.appendChild(div);
         
-        // 添加到历史记录
+        // 添加到历史记录（错误消息等特殊情况）
         conversationHistory.push({ sender: 'assistant', message: message });
         checkAndCleanupHistory();
         saveConversationHistory();
@@ -423,6 +477,7 @@ function checkAndCleanupHistory() {
 // --- 技能中心逻辑 ---
 async function loadSkills() {
     const listEl = document.getElementById('skills-list');
+    if (!listEl) return;
     try {
         const resp = await fetch('/api/skills');
         const data = await resp.json();
@@ -481,14 +536,70 @@ async function deleteSkill() {
 function openSkillModal(name='', content='') {
     document.getElementById('skill-name').value = name;
     document.getElementById('skill-content').value = content;
-    document.getElementById('delete-skill-btn').style.display = name ? 'inline-block' : 'none';
+    const deleteBtn = document.getElementById('delete-skill-btn');
+    if (deleteBtn) {
+        deleteBtn.style.display = name ? 'inline-block' : 'none';
+    }
     document.getElementById('skillModal').style.display = 'flex';
 }
-function closeSkillModal() { document.getElementById('skillModal').style.display = 'none'; }
+function closeSkillModal() { 
+    const modal = document.getElementById('skillModal');
+    if (modal) {
+        modal.style.display = 'none';
+    }
+}
 
 // --- 任务历史逻辑 ---
+let currentViewTaskId = null; // 当前查看的任务 ID
+
+// 加载任务到独立的任务列表页面（调用新 API，后端已按时间倒序）
+async function loadTaskList() {
+    const container = document.getElementById('task-list-container');
+    if (!container) return;
+    try {
+        const resp = await fetch('/api/tasks/list');
+        const data = await resp.json();
+        container.innerHTML = '';
+        
+        // 后端返回格式：{ "tasks": [...] }，无需检查 success 字段
+        if (!data.tasks || !Array.isArray(data.tasks) || data.tasks.length === 0) {
+            container.innerHTML = '<div style="padding:40px; text-align:center; color:#888;">暂无任务历史</div>';
+            return;
+        }
+
+        // 后端已按时间倒序排列，直接使用
+        data.tasks.forEach(task => {
+            const item = document.createElement('div');
+            item.className = 'task-history-item';
+            
+            // 安全获取字段值，兼容多种字段名
+            const taskName = task.name || task.description || '未命名任务';
+            const taskStatus = task.status || 'Unknown';
+            const taskId = task.id || task.task_id || 'unknown';
+            const taskTime = task.created_at || task.createdAt || task.timestamp || '未知时间';
+            
+            let badgeClass = taskStatus === 'Success' ? 'badge-success' : (taskStatus === 'Failed' ? 'badge-danger' : 'badge-warning');
+            
+            item.innerHTML = `
+                <div class="task-history-info">
+                    <div class="task-history-title">${taskName}</div>
+                    <div class="task-history-meta">ID: ${taskId} | ${taskTime}</div>
+                </div>
+                <div class="task-history-status">
+                    <span class="badge ${badgeClass}">${taskStatus}</span>
+                </div>
+            `;
+            item.onclick = () => viewTaskDetail(taskId);
+            container.appendChild(item);
+        });
+    } catch (e) { 
+        container.innerHTML = '<div style="padding:40px; text-align:center; color:#d32f2f;">加载失败：' + e.message + '</div>'; 
+    }
+}
+
 async function loadTasks() {
     const tbody = document.getElementById('tasks-table-body');
+    if (!tbody) return;
     try {
         const resp = await fetch('/api/tasks');
         const data = await resp.json();
@@ -510,20 +621,84 @@ async function loadTasks() {
     } catch (e) { tbody.innerHTML = '<tr><td colspan="5">加载失败</td></tr>'; }
 }
 
+// 加载任务历史到配置页面
+async function loadTaskHistoryToSettings() {
+    const listEl = document.getElementById('task-history-list');
+    if (!listEl) return;
+    try {
+        const resp = await fetch('/api/tasks');
+        const data = await resp.json();
+        listEl.innerHTML = '';
+        if (data.tasks.length === 0) {
+            listEl.innerHTML = '<div style="padding:20px; text-align:center; color:#888;">暂无任务历史</div>';
+            return;
+        }
+
+        // 只显示最近 10 个任务
+        const recentTasks = data.tasks.slice(0, 10);
+        recentTasks.forEach(task => {
+            const item = document.createElement('div');
+            item.className = 'task-history-item';
+            let badgeClass = task.status === 'Success' ? 'badge-success' : (task.status === 'Failed' ? 'badge-danger' : 'badge-warning');
+            item.innerHTML = `
+                <div class="task-history-info">
+                    <div class="task-history-title">${task.description}</div>
+                    <div class="task-history-meta">ID: ${task.id} | ${task.created_at}</div>
+                </div>
+                <div class="task-history-status">
+                    <span class="badge ${badgeClass}">${task.status}</span>
+                </div>
+            `;
+            item.onclick = () => viewTaskDetail(task.id);
+            listEl.appendChild(item);
+        });
+    } catch (e) { 
+        listEl.innerHTML = '<div style="padding:20px; text-align:center; color:#d32f2f;">加载失败</div>'; 
+    }
+}
+
 async function viewTaskDetail(taskId) {
+    currentViewTaskId = taskId; // 保存当前任务 ID
     const contentEl = document.getElementById('task-detail-content');
+    const titleEl = document.getElementById('task-detail-title');
+    const modalEl = document.getElementById('taskDetailModal');
+    if (!contentEl || !titleEl || !modalEl) return;
+    
     contentEl.innerHTML = '加载中...';
-    document.getElementById('task-detail-title').textContent = `任务详情 - ${taskId}`;
-    document.getElementById('taskDetailModal').style.display = 'flex';
+    titleEl.textContent = `任务详情 - ${taskId}`;
+    modalEl.style.display = 'flex';
 
     try {
-        const resp = await fetch(`/api/tasks/${taskId}`);
-        const task = await resp.json();
+        // 优先尝试新接口，兼容旧接口
+        let task;
+        try {
+            const resp = await fetch(`/api/tasks/${taskId}`);
+            task = await resp.json();
+        } catch (e) {
+            // 如果新接口失败，尝试从任务列表查找
+            const listResp = await fetch('/api/tasks/list');
+            const listData = await listResp.json();
+            // 新 API 返回格式：{ "tasks": [...] }，无 success 字段
+            if (listData.tasks && Array.isArray(listData.tasks)) {
+                task = listData.tasks.find(t => (t.id || t.task_id) === taskId) || {};
+            } else {
+                throw new Error('任务不存在');
+            }
+        }
         
-        let logsHtml = '<pre style="background:#f4f4f4; padding:10px; border-radius:4px; overflow-x:auto;">';
-        if(task.logs && task.logs.length > 0) {
-            task.logs.forEach(log => {
-                logsHtml += `[${log.timestamp}] ${JSON.stringify(log.entry)}\n`;
+        // 安全获取字段值，兼容多种字段名
+        const description = task.description || task.name || '未命名任务';
+        const status = task.status || 'Unknown';
+        const result = task.result || task.output || '无';
+        const createdAt = task.created_at || task.createdAt || task.timestamp || '未知时间';
+        const logs = task.logs || task.log || task.logs || [];
+        
+        let logsHtml = '<pre style="background:#f4f4f4; padding:10px; border-radius:4px; overflow-x:auto; max-height:400px; overflow-y:auto;">';
+        if(logs && logs.length > 0) {
+            logs.forEach(log => {
+                const timestamp = log.timestamp || log.time || 'unknown';
+                const entry = log.entry || log.content || log;
+                logsHtml += `[${timestamp}] ${JSON.stringify(entry, null, 2)}\n`;
             });
         } else {
             logsHtml += '暂无日志';
@@ -531,33 +706,122 @@ async function viewTaskDetail(taskId) {
         logsHtml += '</pre>';
 
         contentEl.innerHTML = `
-            <p><strong>描述:</strong> ${task.description}</p>
-            <p><strong>状态:</strong> ${task.status}</p>
-            <p><strong>结果:</strong> ${task.result || '无'}</p>
+            <p><strong>描述:</strong> ${description}</p>
+            <p><strong>状态:</strong> <span class="badge ${status === 'Success' ? 'badge-success' : (status === 'Failed' ? 'badge-danger' : 'badge-warning')}">${status}</span></p>
+            <p><strong>开始时间:</strong> ${createdAt}</p>
+            <p><strong>结果:</strong> ${result}</p>
             <p><strong>日志:</strong></p>
             ${logsHtml}
         `;
-    } catch (e) { contentEl.innerHTML = '加载详情失败：' + e.message; }
+        
+        // 根据任务状态控制"总结成技能"按钮的显示（仅成功任务显示）
+        const summarizeBtn = document.querySelector('#taskDetailModal button[onclick="openSummarizeModal()"]');
+        if (summarizeBtn) {
+            summarizeBtn.style.display = (status === 'Success') ? 'inline-block' : 'none';
+        }
+    } catch (e) { 
+        contentEl.innerHTML = '<div style="padding:40px; text-align:center; color:#d32f2f;">加载详情失败：' + e.message + '</div>'; 
+    }
 }
-function closeTaskDetailModal() { document.getElementById('taskDetailModal').style.display = 'none'; }
+function closeTaskDetailModal() { 
+    const modal = document.getElementById('taskDetailModal');
+    if (modal) {
+        modal.style.display = 'none';
+    }
+}
+
+// --- 总结为技能功能 ---
+function openSummarizeModal() {
+    if (!currentViewTaskId) {
+        alert('请先选择一个任务');
+        return;
+    }
+    document.getElementById('summarize-skill-name').value = '';
+    document.getElementById('summarize-skill-desc').value = '';
+    document.getElementById('summarize-skill-content').value = '技能内容将在保存时自动生成';
+    document.getElementById('summarizeModal').style.display = 'flex';
+}
+
+function closeSummarizeModal() {
+    const modal = document.getElementById('summarizeModal');
+    if (modal) {
+        modal.style.display = 'none';
+    }
+}
+
+async function confirmSummarizeSkill() {
+    const skillName = document.getElementById('summarize-skill-name').value.trim();
+    const skillDesc = document.getElementById('summarize-skill-desc').value.trim();
+    
+    if (!skillName || !skillDesc) {
+        alert('请填写技能名称和描述');
+        return;
+    }
+    
+    if (!currentViewTaskId) {
+        alert('任务 ID 丢失，请重新打开任务详情');
+        return;
+    }
+    
+    try {
+        const resp = await fetch('/api/tasks/summarize', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                task_id: currentViewTaskId,
+                skill_name: skillName,
+                skill_description: skillDesc
+            })
+        });
+        
+        const data = await resp.json();
+        if (data.error) {
+            alert('总结失败：' + data.error);
+        } else {
+            alert(data.message);
+            closeSummarizeModal();
+            closeTaskDetailModal();
+            loadSkills(); // 刷新技能列表
+            loadTokenUsage(); // 总结任务为技能后自动刷新 Token 用量
+        }
+    } catch (e) {
+        alert('总结失败：' + e.message);
+    }
+}
 
 // --- 配置逻辑 ---
 async function loadConfig() {
     try {
         const resp = await fetch('/api/config');
         const config = await resp.json();
-        document.getElementById('api-key').value = config.api_key || '';
-        document.getElementById('base-url').value = config.base_url || '';
-        document.getElementById('model').value = config.model || '';
+        // AI 配置
+        const apiKeyEl = document.getElementById('api-key');
+        const baseUrlEl = document.getElementById('base-url');
+        const modelEl = document.getElementById('model');
+        if (apiKeyEl) apiKeyEl.value = config.api_key || '';
+        if (baseUrlEl) baseUrlEl.value = config.base_url || '';
+        if (modelEl) modelEl.value = config.model || '';
+        // 飞书配置
+        const appIdEl = document.getElementById('feishu-app-id');
+        const appSecretEl = document.getElementById('feishu-app-secret');
+        const encryptKeyEl = document.getElementById('feishu-encrypt-key');
+        const socketEnabledEl = document.getElementById('feishu-socket-enabled');
+        if (appIdEl) appIdEl.value = config.feishu_app_id || '';
+        if (appSecretEl) appSecretEl.value = config.feishu_app_secret || '';
+        if (encryptKeyEl) encryptKeyEl.value = config.feishu_encrypt_key || '';
+        if (socketEnabledEl) socketEnabledEl.checked = config.feishu_socket_enabled || false;
     } catch (e) { console.error('加载配置失败'); }
 }
 
-async function saveConfig(e) {
+async function saveAIConfig(e) {
     e.preventDefault();
+    const apiKeyEl = document.getElementById('api-key');
+    const baseUrlEl = document.getElementById('base-url');
+    const modelEl = document.getElementById('model');
     const config = {
-        api_key: document.getElementById('api-key').value,
-        base_url: document.getElementById('base-url').value,
-        model: document.getElementById('model').value
+        api_key: apiKeyEl ? apiKeyEl.value : '',
+        base_url: baseUrlEl ? baseUrlEl.value : '',
+        model: modelEl ? modelEl.value : ''
     };
     try {
         await fetch('/api/config', {
@@ -565,6 +829,101 @@ async function saveConfig(e) {
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify(config)
         });
-        alert('配置已保存');
+        alert('AI 配置已保存');
     } catch (e) { alert('保存失败：' + e.message); }
 }
+
+async function saveFeishuConfig(e) {
+    e.preventDefault();
+    const appIdEl = document.getElementById('feishu-app-id');
+    const appSecretEl = document.getElementById('feishu-app-secret');
+    const encryptKeyEl = document.getElementById('feishu-encrypt-key');
+    const socketEnabledEl = document.getElementById('feishu-socket-enabled');
+    const config = {
+        feishu_app_id: appIdEl ? appIdEl.value : '',
+        feishu_app_secret: appSecretEl ? appSecretEl.value : '',
+        feishu_encrypt_key: encryptKeyEl ? encryptKeyEl.value : '',
+        feishu_socket_enabled: socketEnabledEl ? socketEnabledEl.checked : false
+    };
+    try {
+        await fetch('/api/config', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(config)
+        });
+        alert('飞书配置已保存');
+        // 显示状态
+        const statusEl = document.getElementById('feishu-status');
+        if (statusEl) {
+            if (config.feishu_socket_enabled) {
+                statusEl.textContent = '✅ 飞书 Socket Mode 已启用，请重启服务以生效';
+                statusEl.style.color = '#28a745';
+            } else {
+                statusEl.textContent = '⚠️ 飞书 Socket Mode 已禁用';
+                statusEl.style.color = '#666';
+            }
+        }
+    } catch (e) { 
+        alert('保存失败：' + e.message);
+        const statusEl = document.getElementById('feishu-status');
+        if (statusEl) {
+            statusEl.textContent = '❌ 保存失败';
+            statusEl.style.color = '#dc3545';
+        }
+    }
+}
+
+// 页面即将卸载时，保存未完成的流式文本
+window.addEventListener('beforeunload', () => {
+    if (currentStreamingText && !hasFinalResponse) {
+        // 强制保存未完成的流式文本
+        conversationHistory.push({ sender: 'assistant', message: currentStreamingText });
+        try {
+            const trimmedHistory = conversationHistory.slice(-MAX_CONVERSATION_TURNS);
+            localStorage.setItem('clerk_conversation_history', JSON.stringify(trimmedHistory));
+        } catch (e) {
+            console.warn('Failed to save unfinished streaming text:', e);
+        }
+    }
+});// --- Token 用量管理 ---
+
+// 加载并显示 Token 用量
+async function loadTokenUsage() {
+    try {
+        const resp = await fetch('/api/token-usage');
+        const data = await resp.json();
+        
+        // 更新显示
+        const promptEl = document.getElementById('token-prompt');
+        const completionEl = document.getElementById('token-completion');
+        const totalEl = document.getElementById('token-total');
+        const sessionsEl = document.getElementById('token-sessions');
+        
+        if (promptEl) promptEl.textContent = (data.prompt_tokens || 0).toLocaleString();
+        if (completionEl) completionEl.textContent = (data.completion_tokens || 0).toLocaleString();
+        if (totalEl) totalEl.textContent = (data.total_tokens || 0).toLocaleString();
+        if (sessionsEl) sessionsEl.textContent = (data.session_count || 0).toLocaleString();
+    } catch (e) {
+        console.warn('加载 Token 用量失败:', e);
+    }
+}
+
+// 重置 Token 用量
+async function resetTokenUsage() {
+    if (!confirm('确定要重置 Token 用量统计吗？此操作不可恢复。')) return;
+    
+    try {
+        const resp = await fetch('/api/token-usage/reset', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'}
+        });
+        const data = await resp.json();
+        alert(data.message || 'Token 用量已重置');
+        loadTokenUsage();
+    } catch (e) {
+        alert('重置失败：' + e.message);
+    }
+}
+
+// 注意：DOMContentLoaded 已在文件开头定义，loadTokenUsage() 已在那里调用
+

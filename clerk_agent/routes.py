@@ -5,6 +5,7 @@ from flask import render_template, request, jsonify, Response, stream_with_conte
 from .config import load_config, save_config
 from .llm_client import call_llm_stream, call_llm
 from .agents import TaskAgent, SkillAgent, WorkerAgent
+from .tools import get_token_usage, reset_token_usage, update_token_usage
 from tagcall import function_call, get_system_prompt, parse_function_calls, global_registry
 
 # 初始化代理
@@ -102,22 +103,47 @@ def register_routes(app):
         except Exception as e:
             return jsonify({"error": str(e)}), 500
 
-    @app.route('/api/tasks/<task_id>')
+    @app.route('/api/tasks/<task_id>', methods=['GET'])
     def get_task_detail(task_id):
-        """获取任务详细信息"""
+        """获取任务详细信息 - 统一字段名"""
         try:
             from pathlib import Path
             import os
             current_dir = Path(os.getcwd())
             
             task_file = current_dir / 'tasks' / f"{task_id}.json"
+            
             if not task_file.exists():
+                # 尝试从 task_history.json 中查找
+                history_file = current_dir / 'tasks' / 'task_history.json'
+                if history_file.exists():
+                    with open(history_file, 'r', encoding='utf-8') as f:
+                        tasks = json.load(f)
+                        for task in tasks:
+                            if task.get('id') == task_id or task.get('task_id') == task_id:
+                                return jsonify({
+                                    "id": task.get('id') or task.get('task_id'),
+                                    "name": task.get('name') or task.get('description') or '未命名任务',
+                                    "description": task.get('description') or task.get('name') or '无描述',
+                                    "status": task.get('status') or task.get('state') or 'Unknown',
+                                    "created_at": task.get('created_at') or task.get('createdAt') or task.get('timestamp') or '未知时间',
+                                    "result": task.get('result') or task.get('output') or '无',
+                                    "logs": task.get('logs') or task.get('log') or []
+                                })
                 return jsonify({"error": f"任务 {task_id} 不存在"}), 404
             
             with open(task_file, 'r', encoding='utf-8') as f:
                 task_data = json.load(f)
             
-            return jsonify(task_data)
+            return jsonify({
+                "id": task_data.get('id') or task_data.get('task_id') or task_id,
+                "name": task_data.get('name') or task_data.get('description') or '未命名任务',
+                "description": task_data.get('description') or task_data.get('name') or '无描述',
+                "status": task_data.get('status') or task_data.get('state') or 'Unknown',
+                "created_at": task_data.get('created_at') or task_data.get('createdAt') or task_data.get('timestamp') or '未知时间',
+                "result": task_data.get('result') or task_data.get('output') or '无',
+                "logs": task_data.get('logs') or task_data.get('log') or []
+            })
         except Exception as e:
             return jsonify({"error": str(e)}), 500
 
@@ -233,13 +259,25 @@ def register_routes(app):
                     iteration += 1
                     yield f"data: {json.dumps({'type': 'iteration_start', 'iteration': iteration})}\n\n"
                     
-                    stream = await call_llm_stream(conversation_history, config)
+                    stream, usage_future = await call_llm_stream(conversation_history, config)
                     llm_response = ""
                     async for chunk in stream:
                         if  chunk.choices.__len__() > 0 and chunk.choices[0].delta.content is not None:
                             content = chunk.choices[0].delta.content
                             llm_response += content
                             yield f"data: {json.dumps({'type': 'llm_token', 'content': content})}\n\n"
+                    
+                    # 等待并记录 token 用量
+                    try:
+                        usage = await usage_future
+                        if usage:
+                            update_token_usage(
+                                prompt_tokens=usage['prompt_tokens'],
+                                completion_tokens=usage['completion_tokens']
+                            )
+                    except Exception as e:
+                        # 记录错误但不中断流程
+                        print(f"Token 用量记录失败：{str(e)}")
                     
                     task_agent.log_to_task(task_id, {
                         "type": "llm_response", "content": llm_response, "iteration": iteration
@@ -270,7 +308,7 @@ def register_routes(app):
                     for call in function_calls:
                         try:
                             result = global_registry.execute_function(
-                                call['name'], *[], **call['kwargs']
+                                call['name'], **call.get('kwargs', {})
                             )
                             log_entry = {
                                 "type": "function_call", "function": call['name'],
@@ -415,7 +453,14 @@ def register_routes(app):
                 return jsonify({"error": "未配置 API Key，请先在设置中配置"}), 400
             
             # 调用 LLM 进行总结
-            summary = await call_llm("你是一个专业的办公自动化助手，请根据要求总结对话。", summary_prompt, config)
+            summary, usage = await call_llm("你是一个专业的办公自动化助手，请根据要求总结对话。", summary_prompt, config)
+            
+            # 记录 token 用量
+            if usage:
+                update_token_usage(
+                    prompt_tokens=usage['prompt_tokens'],
+                    completion_tokens=usage['completion_tokens']
+                )
             
             # 记录总结到任务日志
             task_agent.log_to_task(task_id, {
@@ -427,3 +472,178 @@ def register_routes(app):
             
         except Exception as e:
             return jsonify({"error": str(e)}), 500
+
+    @app.route('/api/token-usage')
+    def get_token_usage_api():
+        """获取 Token 用量统计"""
+        try:
+            usage = get_token_usage()
+            return jsonify(usage)
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+
+    @app.route('/api/token-usage/reset', methods=['POST'])
+    def reset_token_usage_api():
+        """重置 Token 用量统计"""
+        try:
+            reset_token_usage()
+            return jsonify({"message": "Token 用量已重置"})
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+
+    @app.route('/api/tasks/summarize', methods=['POST'])
+    def summarize_task_as_skill():
+        """将任务总结为技能"""
+        try:
+            from pathlib import Path
+            import os
+            current_dir = Path(os.getcwd())
+            
+            data = request.json
+            task_id = data.get('task_id')
+            skill_name = data.get('skill_name')
+            skill_description = data.get('skill_description', '')
+            
+            if not task_id or not skill_name:
+                return jsonify({"error": "缺少任务 ID 或技能名称"}), 400
+            
+            task_file = current_dir / 'tasks' / f"{task_id}.json"
+            if not task_file.exists():
+                return jsonify({"error": f"任务 {task_id} 不存在"}), 404
+            
+            with open(task_file, 'r', encoding='utf-8') as f:
+                task_data = json.load(f)
+            
+            successful_calls = []
+            for log in task_data.get('logs', []):
+                entry = log.get('entry', {})
+                if entry.get('type') == 'function_call' and entry.get('result'):
+                    successful_calls.append({
+                        'function': entry.get('function'),
+                        'kwargs': entry.get('kwargs'),
+                        'result': entry.get('result')
+                    })
+            
+            if not successful_calls:
+                return jsonify({"error": "该任务没有成功的函数调用记录"}), 400
+            
+            script_content = f'''"""
+技能名称：{skill_name}
+描述：{skill_description}
+生成来源：任务 {task_id}
+"""
+
+def execute():
+    """执行技能"""
+    results = []
+    
+'''
+            for i, call in enumerate(successful_calls, 1):
+                func_name = call['function']
+                kwargs_str = ', '.join([f"{k}={repr(v)}" for k, v in call['kwargs'].items()]) if call['kwargs'] else ''
+                script_content += f'''    # 步骤 {i}: 调用 {func_name}
+    result_{i} = {func_name}({kwargs_str})
+    results.append(result_{i})
+    
+'''
+            script_content += '''    return results
+
+if __name__ == "__main__":
+    execute()
+'''
+            
+            scripts_dir = current_dir / "scripts"
+            scripts_dir.mkdir(exist_ok=True)
+            script_file = scripts_dir / f"{skill_name}.py"
+            
+            with open(script_file, 'w', encoding='utf-8') as f:
+                f.write(script_content)
+            
+            skill_md_content = f"""# {skill_name}
+
+{skill_description}
+
+## 来源
+- 任务 ID: {task_id}
+- 生成时间：自动
+
+## 执行步骤
+该技能包含 {len(successful_calls)} 个步骤：
+
+"""
+            for i, call in enumerate(successful_calls, 1):
+                skill_md_content += f"{i}. **{call['function']}** - {call['result'][:50]}...\n"
+            
+            skill_md_content += f"""
+## 脚本位置
+`./scripts/{skill_name}.py`
+
+## 使用方法
+```python
+from scripts.{skill_name} import execute
+execute()
+```
+"""
+            
+            skill_agent.save_skill(skill_name, skill_md_content)
+            
+            return jsonify({
+                "message": f"任务已总结为技能 '{skill_name}'",
+                "script_content": script_content
+            })
+            
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+    @app.route('/api/tasks/list', methods=['GET'])
+    def get_task_list():
+        """获取任务历史列表（时间倒序）- 扫描 T*.json 文件"""
+        try:
+            from pathlib import Path
+            import os
+            import glob
+            # 使用 os.getcwd() 获取项目根目录（通过 python -m 启动时有效）
+            current_dir = Path(os.getcwd())
+            tasks_dir = current_dir / 'tasks'
+            
+            if not tasks_dir.exists():
+                return jsonify({"tasks": []})
+            
+            # 扫描所有 T*.json 文件
+            task_files = glob.glob(str(tasks_dir / 'T*.json'))
+            
+            formatted_tasks = []
+            for file_path in task_files:
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        task_data = json.load(f)
+                    
+                    # 提取关键信息
+                    task_id = task_data.get('id') or task_data.get('task_id') or Path(file_path).stem
+                    task_name = task_data.get('name') or task_data.get('description') or task_data.get('title') or '未命名任务'
+                    task_status = task_data.get('status') or task_data.get('state') or 'Unknown'
+                    task_created = task_data.get('created_at') or task_data.get('createdAt') or task_data.get('timestamp') or '未知时间'
+                    task_result = task_data.get('result') or task_data.get('output') or '无'
+                    
+                    formatted_tasks.append({
+                        "id": task_id,
+                        "name": task_name,
+                        "description": task_data.get('description') or task_name,
+                        "status": task_status,
+                        "created_at": task_created,
+                        "result": task_result,
+                        "logs": task_data.get('logs') or task_data.get('log') or []
+                    })
+                except Exception as e:
+                    # 跳过无法读取的文件
+                    print(f"读取任务文件失败 {file_path}: {str(e)}")
+                    continue
+            
+            # 按时间倒序排列
+            formatted_tasks.sort(key=lambda x: x.get('created_at', ''), reverse=True)
+            
+            return jsonify({"tasks": formatted_tasks})
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+
+    # @app.route('/api/tasks/summarize', methods=['POST'])
+    # def summarize_task_as_skill():

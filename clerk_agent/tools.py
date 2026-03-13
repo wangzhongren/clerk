@@ -377,4 +377,137 @@ def execute_shell_sync(command: str, timeout: int = 10) -> Dict[str, Any]:
         
     except Exception as e:
         kill_proc_tree(proc.pid)
-        return {"stdout": "", "stderr": f"执行异常：{str(e)}", "returncode": -1, "status": "error"}
+        return {"stdout": "", "stderr": f"执行异常：{str(e)}", "returncode": -1, "status": "error"}# ==================== Token 用量统计工具 ====================
+
+def get_token_usage() -> Dict[str, Any]:
+    """
+    获取当前 Token 用量统计
+    
+    Returns:
+        包含 token 用量信息的字典
+    """
+    config_path = Path(__file__).parent.parent / "config" / "token_usage.json"
+    
+    if not config_path.exists():
+        # 初始化配置文件
+        initial_data = {
+            "total_tokens": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "session_count": 0,
+            "last_updated": None,
+            "history": []
+        }
+        with open(config_path, 'w', encoding='utf-8') as f:
+            json.dump(initial_data, f, indent=2, ensure_ascii=False)
+        return initial_data
+    
+    with open(config_path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+    
+    return data
+
+def update_token_usage(prompt_tokens: int, completion_tokens: int) -> Dict[str, Any]:
+    """
+    更新 Token 用量统计
+    
+    Args:
+        prompt_tokens: 输入 token 数
+        completion_tokens: 输出 token 数
+        
+    Returns:
+        更新后的用量信息
+    """
+    from datetime import datetime
+    
+    config_path = Path(__file__).parent.parent / "config" / "token_usage.json"
+    
+    # 读取现有数据
+    if config_path.exists():
+        with open(config_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+    else:
+        data = {
+            "total_tokens": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "session_count": 0,
+            "last_updated": None,
+            "history": []
+        }
+    
+    # 更新累计值
+    data["prompt_tokens"] += prompt_tokens
+    data["completion_tokens"] += completion_tokens
+    data["total_tokens"] = data["prompt_tokens"] + data["completion_tokens"]
+    data["last_updated"] = datetime.now().isoformat()
+    
+    # 添加历史记录（保留最近 100 条）
+    history_entry = {
+        "timestamp": datetime.now().isoformat(),
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": prompt_tokens + completion_tokens
+    }
+    data["history"].append(history_entry)
+    data["history"] = data["history"][-100:]  # 保留最近 100 条
+    
+    # 写入更新后的数据
+    with open(config_path, 'w', encoding='utf-8') as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+    
+    return data
+
+def reset_token_usage() -> Dict[str, Any]:
+    """
+    重置 Token 用量统计
+    
+    Returns:
+        重置后的用量信息
+    """
+    from datetime import datetime
+    
+    config_path = Path(__file__).parent.parent / "config" / "token_usage.json"
+    
+    initial_data = {
+        "total_tokens": 0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "session_count": 0,
+        "last_updated": datetime.now().isoformat(),
+        "history": []
+    }
+    
+    with open(config_path, 'w', encoding='utf-8') as f:
+        json.dump(initial_data, f, indent=2, ensure_ascii=False)
+    
+    return initial_data
+
+def format_token_usage(usage_data: Dict[str, Any]) -> str:
+    """
+    格式化 Token 用量显示
+    
+    Args:
+        usage_data: Token 用量数据
+        
+    Returns:
+        格式化的用量字符串
+    """
+    output = []
+    output.append("📊 Token 用量统计")
+    output.append("=" * 40)
+    output.append(f"总用量：{usage_data.get('total_tokens', 0):,} tokens")
+    output.append(f"├─ 输入：{usage_data.get('prompt_tokens', 0):,} tokens")
+    output.append(f"└─ 输出：{usage_data.get('completion_tokens', 0):,} tokens")
+    output.append(f"会话数：{usage_data.get('session_count', 0)}")
+    output.append(f"最后更新：{usage_data.get('last_updated', '无')}")
+    
+    # 显示最近 5 条记录
+    history = usage_data.get('history', [])
+    if history:
+        output.append("")
+        output.append("最近 5 条记录:")
+        for entry in history[-5:]:
+            output.append(f"  [{entry['timestamp']}] +{entry['total_tokens']:,} tokens")
+    
+    return "\n".join(output)

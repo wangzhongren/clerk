@@ -13,7 +13,7 @@ print(current_dir)
 # 导入必要的模块
 from tagcall import function_call, get_system_prompt, global_registry
 from clerk_agent.agents import TaskAgent, SkillAgent, WorkerAgent
-from clerk_agent.tools import execute_shell_sync, read_file, write_file, execute_shell, modify_file
+from clerk_agent.tools import execute_shell_sync, read_file, write_file, execute_shell, modify_file, get_token_usage
 from clerk_agent.routes import register_routes
 from clerk_agent.config import load_config
 
