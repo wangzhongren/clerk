@@ -219,6 +219,12 @@
 
         <div id="settings" class="tab-content">
             <div style="max-width:800px">
+                <!-- 任务历史 -->
+                <div class="config-section">
+                    <h3>任务历史</h3>
+                    <div id="task-history-list" style="border:1px solid var(--border); margin-top:15px;"></div>
+                </div>
+
                 <!-- AI 配置 -->
                 <div class="config-section">
                     <h3>AI 模型配置</h3>
@@ -295,23 +301,20 @@
         <div class="modal-content">
             <h3 style="margin:0; font-weight:700;">总结为技能</h3>
             <p style="color:#666; font-size:13px; margin:15px 0;">将当前任务的成功执行路径总结为可复用的技能</p>
-            
-            <!-- AI 生成提示 -->
-            <div id="ai-generating" style="display:none; padding:20px; text-align:center; color:#1976d2;">
-                🤖 AI 正在分析任务并生成技能文档...
-            </div>
-            
-            <!-- 隐藏字段，由 AI 填充 -->
-            <input type="hidden" id="summarize-skill-name" value="">
-            <input type="hidden" id="summarize-skill-desc" value="">
-            
             <div class="form-group">
-                <label>技能内容预览 (AI 自动生成)</label>
-                <textarea id="summarize-skill-content" rows="10" placeholder="等待 AI 生成..." readonly></textarea>
+                <label>技能名称</label>
+                <input type="text" id="summarize-skill-name" placeholder="例如：文件批量重命名">
             </div>
-            
+            <div class="form-group">
+                <label>技能描述</label>
+                <input type="text" id="summarize-skill-desc" placeholder="简要描述技能功能">
+            </div>
+            <div class="form-group">
+                <label>技能内容预览</label>
+                <textarea id="summarize-skill-content" rows="10" placeholder="自动生成的技能内容..." readonly></textarea>
+            </div>
             <div style="display:flex; justify-content:flex-end; gap:15px;">
-                <button class="btn-black" onclick="confirmSummarizeSkill()" id="confirm-summarize-btn" disabled>确认保存</button>
+                <button class="btn-black" onclick="confirmSummarizeSkill()">确认保存</button>
                 <button class="btn-outline" onclick="closeSummarizeModal()">取消</button>
             </div>
         </div>

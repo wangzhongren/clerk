@@ -309,7 +309,9 @@ def parse_function_calls(text: str, agent: str = "default") -> List[Dict]:
 
         try:
             # 包装并解析
-            dom = xml.dom.minidom.parseString(f"<root>{block}</root>")
+            # 建议写法
+            safe_block = block.replace(r"\'", "'").replace("&", "&amp;")
+            dom = xml.dom.minidom.parseString(f"<root>{safe_block}</root>")
             root = dom.documentElement
             
             for func_node in root.childNodes:
@@ -349,7 +351,7 @@ def parse_function_calls(text: str, agent: str = "default") -> List[Dict]:
                 'name': tentative_name,
                 'error': f"XML 解析失败: {str(e)}",
                 'type': 'parse_error',
-                'raw_segment': block[:100] # 保留前100个字符方便Debug
+                'raw_segment': block[:1000] # 保留前100个字符方便Debug
             })
             
     return function_calls

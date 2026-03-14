@@ -233,6 +233,38 @@ async function submitTask() {
                         // 迭代开始，可以显示迭代信息（不保存到历史）
                         flushCurrentStreamingText(); // 先刷新累积的 LLM 文本
                         addAssistantMessagePart('info', `--- 迭代 ${data.iteration} ---`);
+                    } else if (data.type === 'navigator_review') {
+                        // 🧭 导航员正在审查任务方向...
+                        flushCurrentStreamingText();
+                        addAssistantMessagePart('navigator-review', `🧭 导航员正在审查任务方向... (第 ${data.step} 步)`);
+                    } else if (data.type === 'navigator_result') {
+                        // 审查结果
+                        flushCurrentStreamingText();
+                        const statusIcon = data.is_on_track ? '✅' : '⚠️';
+                        addAssistantMessagePart('navigator-result', `${statusIcon} 审查结果：${data.summary} (置信度：${data.confidence}%)`);
+                    } else if (data.type === 'navigator_correction') {
+                        // ⚠️ 导航员干预：修正指令
+                        flushCurrentStreamingText();
+                        addAssistantMessagePart('navigator-correction', `⚠️ 导航员干预：${data.message}`);
+                    } else if (data.type === 'navigator_final_review') {
+                        // 🔍 导航员正在进行最终验收...
+                        flushCurrentStreamingText();
+                        addAssistantMessagePart('navigator-final-review', '🔍 导航员正在进行最终验收...');
+                    } else if (data.type === 'navigator_final_result') {
+                        // 最终验收结果
+                        flushCurrentStreamingText();
+                        const statusMap = {
+                            'PASS': '✅ 任务通过验收',
+                            'FAIL': '❌ 任务未通过验收',
+                            'NEED_MORE_WORK': '⚠️ 需要继续工作'
+                        };
+                        const verdict = data.result?.final_verdict || 'UNKNOWN';
+                        const reason = data.result?.reason || '无原因';
+                        addAssistantMessagePart('navigator-final-result', `${statusMap[verdict] || verdict}: ${reason}`);
+                    } else if (data.type === 'navigator_rejection') {
+                        // ❌ 验收未通过：要求继续工作
+                        flushCurrentStreamingText();
+                        addAssistantMessagePart('navigator-rejection', `❌ 验收未通过：${data.message}`);
                     }
                 }
             }
@@ -391,6 +423,35 @@ function addAssistantMessagePart(type, content) {
             partDiv.style.color = '#7b1fa2';
             partDiv.style.backgroundColor = '#f3e5f5';
             partDiv.style.borderLeft = '2px solid #9c27b0';
+            partDiv.style.fontWeight = 'bold';
+        } else if (type === 'navigator-review') {
+            partDiv.style.color = '#9c27b0';
+            partDiv.style.backgroundColor = '#f3e5f5';
+            partDiv.style.borderLeft = '2px solid #9c27b0';
+            partDiv.style.fontWeight = 'bold';
+        } else if (type === 'navigator-result') {
+            partDiv.style.color = '#7b1fa2';
+            partDiv.style.backgroundColor = '#e1bee7';
+            partDiv.style.borderLeft = '2px solid #7b1fa2';
+        } else if (type === 'navigator-correction') {
+            partDiv.style.color = '#d32f2f';
+            partDiv.style.backgroundColor = '#ffcdd2';
+            partDiv.style.borderLeft = '2px solid #f44336';
+            partDiv.style.fontWeight = 'bold';
+        } else if (type === 'navigator-final-review') {
+            partDiv.style.color = '#9c27b0';
+            partDiv.style.backgroundColor = '#f3e5f5';
+            partDiv.style.borderLeft = '2px solid #9c27b0';
+            partDiv.style.fontWeight = 'bold';
+        } else if (type === 'navigator-final-result') {
+            partDiv.style.color = '#388e3c';
+            partDiv.style.backgroundColor = '#c8e6c9';
+            partDiv.style.borderLeft = '2px solid #4caf50';
+            partDiv.style.fontWeight = 'bold';
+        } else if (type === 'navigator-rejection') {
+            partDiv.style.color = '#d32f2f';
+            partDiv.style.backgroundColor = '#ffcdd2';
+            partDiv.style.borderLeft = '2px solid #f44336';
             partDiv.style.fontWeight = 'bold';
         } else if (type === 'llm') {
             partDiv.style.color = '#666';
@@ -731,15 +792,48 @@ function closeTaskDetailModal() {
 }
 
 // --- 总结为技能功能 ---
-function openSummarizeModal() {
+async function openSummarizeModal() {
     if (!currentViewTaskId) {
         alert('请先选择一个任务');
         return;
     }
+    
+    // 清空所有字段
     document.getElementById('summarize-skill-name').value = '';
     document.getElementById('summarize-skill-desc').value = '';
-    document.getElementById('summarize-skill-content').value = '技能内容将在保存时自动生成';
+    document.getElementById('summarize-skill-content').value = '等待 AI 生成...';
+    document.getElementById('ai-generating').style.display = 'block';
+    document.getElementById('confirm-summarize-btn').disabled = true;
     document.getElementById('summarizeModal').style.display = 'flex';
+    
+    // 立即调用 API 进行 AI 生成
+    try {
+        const resp = await fetch('/api/tasks/summarize', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                task_id: currentViewTaskId
+            })
+        });
+        
+        const data = await resp.json();
+        if (data.error) {
+            alert('AI 生成失败：' + data.error);
+            document.getElementById('ai-generating').style.display = 'none';
+            document.getElementById('summarize-skill-content').value = '生成失败，请重试';
+        } else {
+            // 填充 AI 生成的内容
+            document.getElementById('summarize-skill-content').value = data.script_content || '';
+            document.getElementById('summarize-skill-name').value = data.skill_name || '';
+            document.getElementById('summarize-skill-desc').value = data.skill_description || '';
+            document.getElementById('ai-generating').style.display = 'none';
+            document.getElementById('confirm-summarize-btn').disabled = false;
+        }
+    } catch (e) {
+        alert('AI 生成失败：' + e.message);
+        document.getElementById('ai-generating').style.display = 'none';
+        document.getElementById('summarize-skill-content').value = '生成失败，请重试';
+    }
 }
 
 function closeSummarizeModal() {
@@ -750,34 +844,38 @@ function closeSummarizeModal() {
 }
 
 async function confirmSummarizeSkill() {
-    const skillName = document.getElementById('summarize-skill-name').value.trim();
-    const skillDesc = document.getElementById('summarize-skill-desc').value.trim();
-    
-    if (!skillName || !skillDesc) {
-        alert('请填写技能名称和描述');
-        return;
-    }
-    
+    // 直接调用 API，由后端 AI 自动生成所有内容
     if (!currentViewTaskId) {
         alert('任务 ID 丢失，请重新打开任务详情');
         return;
     }
+    
+    // 显示 AI 生成中提示
+    document.getElementById('ai-generating').style.display = 'block';
+    document.getElementById('confirm-summarize-btn').disabled = true;
     
     try {
         const resp = await fetch('/api/tasks/summarize', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({
-                task_id: currentViewTaskId,
-                skill_name: skillName,
-                skill_description: skillDesc
+                task_id: currentViewTaskId
             })
         });
         
         const data = await resp.json();
         if (data.error) {
             alert('总结失败：' + data.error);
+            document.getElementById('ai-generating').style.display = 'none';
+            document.getElementById('confirm-summarize-btn').disabled = false;
         } else {
+            // 填充预览内容
+            document.getElementById('summarize-skill-content').value = data.script_content || '';
+            
+            // 填充 AI 生成的名称和描述到隐藏字段
+            document.getElementById('summarize-skill-name').value = data.skill_name || '';
+            document.getElementById('summarize-skill-desc').value = data.skill_description || '';
+            
             alert(data.message);
             closeSummarizeModal();
             closeTaskDetailModal();
@@ -786,6 +884,8 @@ async function confirmSummarizeSkill() {
         }
     } catch (e) {
         alert('总结失败：' + e.message);
+        document.getElementById('ai-generating').style.display = 'none';
+        document.getElementById('confirm-summarize-btn').disabled = false;
     }
 }
 
@@ -894,6 +994,7 @@ async function loadTokenUsage() {
         const data = await resp.json();
         
         // 更新显示
+// 更新显示
         const promptEl = document.getElementById('token-prompt');
         const completionEl = document.getElementById('token-completion');
         const totalEl = document.getElementById('token-total');
@@ -924,6 +1025,3 @@ async function resetTokenUsage() {
         alert('重置失败：' + e.message);
     }
 }
-
-// 注意：DOMContentLoaded 已在文件开头定义，loadTokenUsage() 已在那里调用
-

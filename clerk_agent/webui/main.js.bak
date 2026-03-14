@@ -388,6 +388,63 @@ function openSkillModal(name='', content='') {
 }
 function closeSkillModal() { document.getElementById('skillModal').style.display = 'none'; }
 
+async function loadTasks() {
+    const tbody = document.getElementById('tasks-table-body');
+    try {
+        const resp = await fetch('/api/tasks');
+        const data = await resp.json();
+        tbody.innerHTML = '';
+        if (data.tasks.length === 0) tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;">暂无任务</td></tr>';
+
+        data.tasks.forEach(task => {
+            const row = document.createElement('tr');
+            let badgeClass = task.status === 'Success' ? 'badge-success' : (task.status === 'Failed' ? 'badge-danger' : 'badge-warning');
+            row.innerHTML = `
+                <td>${task.id}</td>
+                <td>${task.created_at}</td>
+                <td>${task.description}</td>
+                <td><span class="badge ${badgeClass}">${task.status}</span></td>
+                <td><button class="btn-outline" onclick="viewTaskDetail('${task.id}')">详情</button></td>
+            `;
+            tbody.appendChild(row);
+        });
+    } catch (e) { tbody.innerHTML = '<tr><td colspan="5">加载失败</td></tr>'; }
+}
+
+async function viewTaskDetail(taskId) {
+    const contentEl = document.getElementById('task-detail-content');
+    contentEl.innerHTML = '加载中...';
+    document.getElementById('task-detail-title').textContent = `任务详情 - ${taskId}`;
+    document.getElementById('taskDetailModal').style.display = 'flex';
+
+    try {
+        const resp = await fetch(`/api/tasks/${taskId}`);
+        const task = await resp.json();
+        
+        let logsHtml = '<pre style="background:var(--google-gray-100); padding:10px; border-radius:4px; overflow-x:auto;">';
+        if(task.logs && task.logs.length > 0) {
+            task.logs.forEach(log => {
+                logsHtml += `[${log.timestamp}] ${JSON.stringify(log.entry)}\n`;
+            });
+        } else {
+            logsHtml += '暂无日志';
+        }
+        logsHtml += '</pre>';
+
+        contentEl.innerHTML = `
+            <p><strong>描述:</strong> ${task.description}</p>
+            <p><strong>状态:</strong> ${task.status}</p>
+            <p><strong>结果:</strong> ${task.result || '无'}</p>
+            <p><strong>日志:</strong></p>
+            ${logsHtml}
+        `;
+    } catch (e) { contentEl.innerHTML = '加载详情失败: ' + e.message; }
+}
+function closeTaskDetailModal() { document.getElementById('taskDetailModal').style.display = 'none'; }
+
+// --- 配置逻辑 ---
+async function loadConfig() {
+    try {
         const resp = await fetch('/api/config');
         const config = await resp.json();
         document.getElementById('api-key').value = config.api_key || '';

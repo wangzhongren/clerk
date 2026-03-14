@@ -1,10 +1,12 @@
 import json
 import asyncio
 import os
+from pathlib import Path
 from flask import render_template, request, jsonify, Response, stream_with_context
 from .config import load_config, save_config
 from .llm_client import call_llm_stream, call_llm
 from .agents import TaskAgent, SkillAgent, WorkerAgent
+from .navigator import NavigatorAgent
 from .tools import get_token_usage, reset_token_usage, update_token_usage
 from tagcall import function_call, get_system_prompt, parse_function_calls, global_registry
 
@@ -12,6 +14,7 @@ from tagcall import function_call, get_system_prompt, parse_function_calls, glob
 task_agent = TaskAgent()
 skill_agent = SkillAgent()
 worker_agent = WorkerAgent(task_agent, skill_agent)
+navigator_agent = NavigatorAgent()
 
 def register_routes(app):
     """注册所有路由"""
@@ -251,13 +254,61 @@ def register_routes(app):
             ] + new_history + fake_shot + [current_query]
             max_iterations = 100
             iteration = 0
+            last_llm_response = ""
+            
+            # 获取任务描述用于导航审查
+            task_description = user_input
             
             # 内部 async 生成器逻辑
             async def _async_generate():
-                nonlocal iteration, conversation_history
+                nonlocal iteration, conversation_history, last_llm_response
                 while iteration < max_iterations:
                     iteration += 1
                     yield f"data: {json.dumps({'type': 'iteration_start', 'iteration': iteration})}\n\n"
+                    
+                    # 【导航审查 1】每 5 步审查一次方向
+                    if iteration > 1 and iteration % 5 == 0:
+                        yield f"data: {json.dumps({'type': 'navigator_review', 'step': iteration, 'message': '🧭 导航员正在审查任务方向...'})}\n\n"
+                        
+                        # 获取当前任务日志
+                        current_task_file = Path(os.getcwd()) / 'tasks' / f"{task_id}.json"
+                        logs = []
+                        if current_task_file.exists():
+                            with open(current_task_file, 'r', encoding='utf-8') as f:
+                                task_data = json.load(f)
+                                logs = task_data.get('logs', [])
+                        
+                        # 调用导航员审查
+                        review_result = await navigator_agent.review_progress(task_description, logs, iteration)
+                        
+                        # 记录审查结果
+                        task_agent.log_to_task(task_id, {
+                            "type": "navigator_review",
+                            "iteration": iteration,
+                            "result": review_result
+                        })
+                        
+                        # 根据 is_on_track 和 suggestion 生成 summary
+                        is_on_track = review_result.get('is_on_track', False)
+                        suggestion = review_result.get('suggestion', '')
+                        if is_on_track:
+                            summary = '任务进展顺利，方向正确'
+                        elif suggestion:
+                            summary = f'发现问题：{suggestion[:50]}'
+                        else:
+                            summary = '任务方向可能存在问题，建议重新评估'
+                        
+                        yield f"data: {json.dumps({'type': 'navigator_result', 'step': iteration, 'is_on_track': is_on_track, 'summary': summary, 'confidence': int(review_result.get('confidence', 0) * 100), 'should_interrupt': review_result.get('should_interrupt', False)})}\n\n"
+                        
+                        # 如果需要干预，注入修正指令
+                        if review_result.get('should_interrupt'):
+                            correction = review_result.get('suggestion', '请重新评估当前策略')
+                            yield f"data: {json.dumps({'type': 'navigator_correction', 'message': f'⚠️ 导航员干预：{correction}'})}\n\n"
+                            # 在对话历史中注入系统指令
+                            conversation_history.append({
+                                "role": "system",
+                                "content": f"⚠️ 导航员指令：{correction} 请立即调整策略。"
+                            })
                     
                     stream, usage_future = await call_llm_stream(conversation_history, config)
                     llm_response = ""
@@ -266,6 +317,8 @@ def register_routes(app):
                             content = chunk.choices[0].delta.content
                             llm_response += content
                             yield f"data: {json.dumps({'type': 'llm_token', 'content': content})}\n\n"
+                    
+                    last_llm_response = llm_response
                     
                     # 等待并记录 token 用量
                     try:
@@ -288,20 +341,52 @@ def register_routes(app):
                     # 检查是否解析失败
                     if len(function_calls) == 1 and 'error' in function_calls[0]:
                         error_msg = function_calls[0]['error']
-                        # 将错误信息作为观察结果反馈给 AI
-                        # 你的工具调用格式有误（错误：{error_info}）。请检查 _body_fields 和 CDATA 的对应关系，并重新输出该工具调用块
                         observation = f"你的工具调用格式有误（错误：:{error_msg}),请检查 _body_fields 和 CDATA 的对应关系，并重新输出该工具调用块"
                         yield f"data: {json.dumps({'type': 'function_error', 'function': 'parse_error', 'error': error_msg})}\n\n"
                         
-                        # 添加到对话历史，让 AI 重新生成
                         conversation_history.append({"role": "assistant", "content": llm_response})
                         conversation_history.append({"role": "system", "content": f"Observation: {observation}"})
                         yield f"data: {json.dumps({'type': 'observation', 'content': observation})}\n\n"
                         continue
                     
+                    # 【导航审查 2】当没有工具调用时，进行最终审查
                     if not function_calls:
+                        yield f"data: {json.dumps({'type': 'navigator_final_review', 'message': '🔍 导航员正在进行最终验收...'})}\n\n"
+                        
+                        # 获取当前任务日志
+                        current_task_file = Path(os.getcwd()) / 'tasks' / f"{task_id}.json"
+                        logs = []
+                        if current_task_file.exists():
+                            with open(current_task_file, 'r', encoding='utf-8') as f:
+                                task_data = json.load(f)
+                                logs = task_data.get('logs', [])
+                        
+                        # 调用导航员最终审查
+                        final_review_result = await navigator_agent.final_review(task_description, logs, llm_response)
+                        
+                        # 记录审查结果
+                        task_agent.log_to_task(task_id, {
+                            "type": "navigator_final_review",
+                            "result": final_review_result
+                        })
+                        
+                        yield f"data: {json.dumps({'type': 'navigator_final_result', 'result': final_review_result})}\n\n"
+                        
+                        # 如果未通过审查，注入修正指令并继续循环
+                        if final_review_result.get('final_verdict') != 'PASS':
+                            correction = final_review_result.get('correction_instruction', '任务未完成，请继续工作')
+                            yield f"data: {json.dumps({'type': 'navigator_rejection', 'message': f'❌ 验收未通过：{correction}'})}\n\n"
+                            
+                            conversation_history.append({"role": "assistant", "content": llm_response})
+                            conversation_history.append({
+                                "role": "system",
+                                "content": f"❌ 验收未通过：{correction} 请继续执行必要操作。"
+                            })
+                            continue
+                        
+                        # 通过审查，任务真正完成
                         yield f"data: {json.dumps({'type': 'final_response', 'content': llm_response})}\n\n"
-                        task_agent.complete_task(task_id, "")
+                        task_agent.complete_task(task_id, llm_response)
                         break
                     
                     observation = ""
@@ -491,29 +576,114 @@ def register_routes(app):
         except Exception as e:
             return jsonify({"error": str(e)}), 500
 
+    # 新增：AI 自动生成技能信息的辅助函数
+    async def generate_skill_from_task(task_data):
+        """AI 自动生成技能名称、描述和技能书"""
+        
+        # 构建 Prompt
+        prompt = f"""
+你是一个技能文档专家。请根据以下任务执行记录，自动生成一个技能文档。
+
+【任务信息】
+- 任务描述：{task_data.get('description', '无描述')}
+- 执行状态：{task_data.get('status', '未知')}
+- 执行日志：{str(task_data.get('logs', ''))[:1000]}
+
+【要求】
+1. 技能名称：简洁明了，不超过 20 字
+2. 技能描述：50-100 字，说明技能用途
+3. 技能书内容：Markdown 格式，包含：
+   - 功能概述
+   - 使用方法
+   - 参数说明
+   - 示例代码
+   - 注意事项
+
+请直接输出 JSON 格式：
+{{
+    "skill_name": "技能名称",
+    "skill_desc": "技能描述",
+    "skill_md_content": "# 技能标题\\n\\n## 功能概述\\n...\\n## 使用方法\\n...\\n"
+}}
+"""
+        
+        # 加载配置并调用 LLM
+        config = load_config()
+        if not config.get('api_key'):
+            raise Exception("未配置 API Key")
+        
+        response, _ = await call_llm("你是一个专业的技能文档专家，请严格按照 JSON 格式输出，不要包含任何 Markdown 标记或额外文本。", prompt, config)
+        
+        # 解析 JSON（增加清理逻辑）
+        import json
+        import re
+        
+        # 清理响应：去除 Markdown 代码块标记
+        cleaned_response = response.strip()
+        if cleaned_response.startswith('```json'):
+            cleaned_response = cleaned_response[7:]
+        if cleaned_response.startswith('```'):
+            cleaned_response = cleaned_response[3:]
+        if cleaned_response.endswith('```'):
+            cleaned_response = cleaned_response[:-3]
+        cleaned_response = cleaned_response.strip()
+        
+        # 尝试解析 JSON
+        try:
+            result = json.loads(cleaned_response)
+        except json.JSONDecodeError as e:
+            # 尝试提取 JSON 部分（如果响应包含额外文本）
+            json_match = re.search(r'\{.*\}', cleaned_response, re.DOTALL)
+            if json_match:
+                result = json.loads(json_match.group())
+            else:
+                raise Exception(f"AI 返回的内容不是有效的 JSON 格式：{cleaned_response[:200]}")
+        
+        return result['skill_name'], result['skill_desc'], result['skill_md_content']
+
     @app.route('/api/tasks/summarize', methods=['POST'])
     def summarize_task_as_skill():
-        """将任务总结为技能"""
+        """将任务总结为技能（AI 自动生成）"""
         try:
             from pathlib import Path
             import os
+            import glob
             current_dir = Path(os.getcwd())
             
             data = request.json
             task_id = data.get('task_id')
-            skill_name = data.get('skill_name')
-            skill_description = data.get('skill_description', '')
             
-            if not task_id or not skill_name:
-                return jsonify({"error": "缺少任务 ID 或技能名称"}), 400
+            # 1. 加载任务数据
+            tasks_dir = current_dir / 'tasks'
+            if not tasks_dir.exists():
+                return jsonify({"error": "任务目录不存在"}), 400
             
-            task_file = current_dir / 'tasks' / f"{task_id}.json"
-            if not task_file.exists():
-                return jsonify({"error": f"任务 {task_id} 不存在"}), 404
+            # 兼容 task_id 带或不带 "T" 前缀的情况
+            if not task_id.startswith('T'):
+                task_file_path = tasks_dir / f"T{task_id}.json"
+            else:
+                task_file_path = tasks_dir / f"{task_id}.json"
             
-            with open(task_file, 'r', encoding='utf-8') as f:
+            task_files = glob.glob(str(task_file_path))
+            if not task_files:
+                return jsonify({"error": f"任务 {task_id} 不存在 (搜索路径：{task_file_path})"}), 404
+            
+            with open(task_files[0], 'r', encoding='utf-8') as f:
                 task_data = json.load(f)
             
+            # 2. AI 自动生成技能信息（异步调用）
+            try:
+                import asyncio
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    skill_name, skill_description, skill_md_content = loop.run_until_complete(generate_skill_from_task(task_data))
+                finally:
+                    loop.close()
+            except Exception as e:
+                return jsonify({"error": f"AI 生成失败：{str(e)}"}), 500
+            
+            # 3. 提取成功的函数调用
             successful_calls = []
             for log in task_data.get('logs', []):
                 entry = log.get('entry', {})
@@ -521,12 +691,13 @@ def register_routes(app):
                     successful_calls.append({
                         'function': entry.get('function'),
                         'kwargs': entry.get('kwargs'),
-                        'result': entry.get('result')
+                        'result': str(entry.get('result'))[:100]
                     })
             
             if not successful_calls:
                 return jsonify({"error": "该任务没有成功的函数调用记录"}), 400
             
+            # 4. 生成脚本内容
             script_content = f'''"""
 技能名称：{skill_name}
 描述：{skill_description}
@@ -552,6 +723,7 @@ if __name__ == "__main__":
     execute()
 '''
             
+            # 5. 保存脚本到 scripts 目录
             scripts_dir = current_dir / "scripts"
             scripts_dir.mkdir(exist_ok=True)
             script_file = scripts_dir / f"{skill_name}.py"
@@ -559,37 +731,14 @@ if __name__ == "__main__":
             with open(script_file, 'w', encoding='utf-8') as f:
                 f.write(script_content)
             
-            skill_md_content = f"""# {skill_name}
-
-{skill_description}
-
-## 来源
-- 任务 ID: {task_id}
-- 生成时间：自动
-
-## 执行步骤
-该技能包含 {len(successful_calls)} 个步骤：
-
-"""
-            for i, call in enumerate(successful_calls, 1):
-                skill_md_content += f"{i}. **{call['function']}** - {call['result'][:50]}...\n"
-            
-            skill_md_content += f"""
-## 脚本位置
-`./scripts/{skill_name}.py`
-
-## 使用方法
-```python
-from scripts.{skill_name} import execute
-execute()
-```
-"""
-            
+            # 6. 保存技能文档（使用 AI 生成的内容）
             skill_agent.save_skill(skill_name, skill_md_content)
             
             return jsonify({
                 "message": f"任务已总结为技能 '{skill_name}'",
-                "script_content": script_content
+                "script_content": script_content,
+                "skill_name": skill_name,
+                "skill_description": skill_description
             })
             
         except Exception as e:
@@ -645,5 +794,3 @@ execute()
         except Exception as e:
             return jsonify({"error": str(e)}), 500
 
-    # @app.route('/api/tasks/summarize', methods=['POST'])
-    # def summarize_task_as_skill():
