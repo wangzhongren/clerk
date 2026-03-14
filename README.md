@@ -348,15 +348,3 @@ class NavigatorAgent:
 
 ---
 
-## 📄 许可证
-
-本项目采用 MIT 许可证 - 详见 [LICENSE](LICENSE) 文件。
-
----
-
-> **边界 AI 达模型 v5.0** - 让 AI 无法做错，让技能持续进化，让导航员全程监督。
-
-**项目位置**: `/Users/wangzhongren/code/Clery/office-skills-agent/`  
-**技能目录**: `/Users/wangzhongren/code/Clery/office-skills-agent/skills/`  
-**启动命令**: `python -m clerk_agent.app`  
-**访问地址**: `http://localhost:5002`
