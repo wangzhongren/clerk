@@ -5,7 +5,7 @@
 ![Protocol](https://img.shields.io/badge/protocol-ReAct%2BD%2BT-orange)
 ![Navigator](https://img.shields.io/badge/navigator-Enabled-purple)
 
-**Clerk Agent**（边界 AI 达模型）是一个基于 **ReAct+D+T（自适应维护）协议** 的企业级办公自动化智能体框架。它通过明确的**工具/技能分层架构**和**导航代理监督机制**，将通用 AI 能力转化为可沉淀、可复用、可审计的自动化资产。
+**Clerk Agent** 是一个基于 **ReAct+D+T（自适应维护）协议** 的企业级办公自动化智能体框架。它通过明确的**工具/技能分层架构**和**导航代理监督机制**，将通用 AI 能力转化为可沉淀、可复用、可审计的自动化资产。
 
 > 🎯 **核心理念**：AI 负责执行，人类负责决策，导航员负责监督。优秀的 AI Code 工程不是让 AI 猜你想要什么，而是通过结构化的声明，让 AI 无法做错。
 
