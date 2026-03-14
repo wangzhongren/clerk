@@ -1,7 +1,7 @@
-# Clerk Agent - 边界 AI 达模型 (v5.0)
+# Clerk Agent 
 
 ![Version](https://img.shields.io/badge/version-5.0.0-blue)
-![License](https://img.shields.io/badge/license-MIT-green)
+![License](https://img.shields.io/badge/license-apache--2.0-red)
 ![Protocol](https://img.shields.io/badge/protocol-ReAct%2BD%2BT-orange)
 ![Navigator](https://img.shields.io/badge/navigator-Enabled-purple)
 
